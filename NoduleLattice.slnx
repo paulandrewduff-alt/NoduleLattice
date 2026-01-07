@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="NoduleLattice.Api/NoduleLattice.Api.csproj">
+      <BuildDependency Project="NoduleLattice/NoduleLattice.csproj" />
+    </Project>
+    <Project Path="NoduleLattice/NoduleLattice.csproj" />
+  </Folder>
+  <Project Path="NoduleLattice.Blazor/NoduleLattice.Blazor.csproj" Id="bd4714ce-4e0e-4b43-8de8-dcfe5266834f" />
+</Solution>

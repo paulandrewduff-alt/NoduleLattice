@@ -1,0 +1,301 @@
+﻿@page "/"
+
+<h1>Sanity View</h1>
+
+@if (!string.IsNullOrWhiteSpace(_apiStatus))
+{
+    <div class="card" style="margin-bottom:1rem;">
+        <div class="mono">@_apiStatus</div>
+        @if (!string.IsNullOrWhiteSpace(_apiError))
+        {
+            <div class="muted" style="margin-top:0.35rem;">@_apiError</div>
+        }
+    </div>
+}
+
+<div class="grid">
+    <section class="card">
+        <header class="card-h">
+            <div>
+                <div class="h-title">3D Network</div>
+                <div class="h-sub">Snapshot-only rendering • Orbit mouse controls</div>
+            </div>
+            <div class="pill">Step: @_stepIndex</div>
+        </header>
+
+        <Network3D Snapshot="_snapshot" HeightPx="520" />
+
+        <div class="row" style="margin-top:0.75rem;">
+            <button class="btn" @onclick="Refresh">Refresh</button>
+            <button class="btn" @onclick="() => Step(1)">Step 1</button>
+            <button class="btn" @onclick="() => Step(16)">Step 16</button>
+            <button class="btn" @onclick="() => Step(128)">Step 128</button>
+
+            <div class="spacer"></div>
+
+            <button class="btn" @onclick="SleepReplay">Sleep Replay</button>
+        </div>
+    </section>
+
+    <section class="card">
+        <header class="card-h">
+            <div>
+                <div class="h-title">Modulators</div>
+                <div class="h-sub">Explicit control only • maps 1:1 to internal values</div>
+            </div>
+        </header>
+
+        <div class="form">
+            @ModSlider("Reward", nameof(UiModulators.Reward))
+            @ModSlider("Salience", nameof(UiModulators.Salience))
+            @ModSlider("Stability", nameof(UiModulators.Stability))
+            @ModSlider("Alerting", nameof(UiModulators.Alerting))
+            @ModSlider("Curiosity", nameof(UiModulators.Curiosity))
+            @ModSlider("Goal", nameof(UiModulators.Goal))
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="ApplyModulators">Apply</button>
+                <button class="btn" @onclick="ZeroModulators">Zero</button>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <header class="card-h">
+            <div>
+                <div class="h-title">Stimulus</div>
+                <div class="h-sub">Explicit sensory drive into an input band</div>
+            </div>
+        </header>
+
+        <div class="form">
+            <label>Rate (Hz)</label>
+            <input class="input" type="number" step="1" @bind="_stimRateHz" />
+
+            <label>Strength</label>
+            <input class="input" type="number" step="0.01" @bind="_stimStrength" />
+
+            <label>Steps</label>
+            <input class="input" type="number" step="1" @bind="_stimSteps" />
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="RunStimulus">Stimulate</button>
+                <div class="spacer"></div>
+                <button class="btn" @onclick="Refresh">Refresh</button>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <header class="card-h">
+            <div>
+                <div class="h-title">Injection</div>
+                <div class="h-sub">External input only (exc/inh) • explicit action</div>
+            </div>
+        </header>
+
+        <div class="form">
+            <label>Node Id</label>
+            <input class="input" type="number" @bind="_inject.NodeId" />
+
+            <label>Exc</label>
+            <input class="input" type="number" step="0.01" @bind="_inject.Exc" />
+
+            <label>Inh</label>
+            <input class="input" type="number" step="0.01" @bind="_inject.Inh" />
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="Inject">Inject</button>
+                <div class="spacer"></div>
+                <button class="btn" @onclick="Refresh">Refresh</button>
+            </div>
+        </div>
+    </section>
+
+    <section class="card">
+        <header class="card-h">
+            <div>
+                <div class="h-title">Archive</div>
+                <div class="h-sub">Save/Load engine state • reversible operations</div>
+            </div>
+        </header>
+
+        <div class="form">
+            <div class="row">
+                <button class="btn" @onclick="SaveArchive">Save</button>
+                <button class="btn" @onclick="LoadArchive">Load</button>
+                <div class="spacer"></div>
+                <button class="btn" @onclick="ClearArchiveText">Clear</button>
+            </div>
+
+            <label>Base64 Archive</label>
+            <textarea class="textarea" rows="8" @bind="_archiveBase64"></textarea>
+        </div>
+    </section>
+</div>
+
+@code {
+    [Inject] private LatticeApiClient Api { get; set; } = default!;
+
+    private long _stepIndex;
+    private LatticeSnapshotDto? _snapshot;
+
+    private UiModulators _mods = new();
+    private UiInject _inject = new() { NodeId = 1, Exc = 0.25f, Inh = 0f };
+
+    // Stimulus controls
+    private float _stimRateHz = 8f;
+    private float _stimStrength = 0.25f;
+    private int _stimSteps = 32;
+
+    private string _archiveBase64 = string.Empty;
+
+    private string _apiStatus = string.Empty;
+    private string _apiError = string.Empty;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await Refresh();
+    }
+
+    private async Task Refresh()
+    {
+        _apiStatus = "API BaseUrl: (see appsettings: LatticeApi:BaseUrl)";
+        _apiError = string.Empty;
+
+        _snapshot = await Api.GetSnapshot();
+
+        if (_snapshot is null)
+        {
+            _apiStatus += " • Snapshot: (not resolved)";
+            _apiError = Api.LastError ?? "Unknown error.";
+            _stepIndex = 0;
+            return;
+        }
+
+        _apiStatus += $" • Snapshot: {Api.LastResolvedSnapshotPath}";
+        _stepIndex = _snapshot.StepIndex;
+        StateHasChanged();
+    }
+
+    private async Task Step(int n)
+    {
+        await Api.Step(n);
+        await Refresh();
+    }
+
+    private async Task ApplyModulators()
+    {
+        await Api.SetModulators(_mods);
+        await Refresh();
+    }
+
+    private async Task ZeroModulators()
+    {
+        _mods = new UiModulators();
+        await ApplyModulators();
+    }
+
+    private async Task Inject()
+    {
+        await Api.Inject(_inject);
+        await Refresh();
+    }
+
+    private async Task RunStimulus()
+    {
+        var req = new StimulusRequest
+        {
+            Group = 0,
+            RateHz = _stimRateHz,
+            Strength = _stimStrength,
+            Steps = _stimSteps
+        };
+
+        await Api.Stimulus(req);
+        await Refresh();
+    }
+
+    private async Task SleepReplay()
+    {
+        await Api.SleepReplay();
+        await Refresh();
+    }
+
+    private async Task SaveArchive()
+    {
+        var dto = await Api.GetArchive();
+        _archiveBase64 = dto.Base64;
+    }
+
+    private async Task LoadArchive()
+    {
+        if (string.IsNullOrWhiteSpace(_archiveBase64)) return;
+        await Api.LoadArchive(new ArchiveDto { Base64 = _archiveBase64.Trim() });
+        await Refresh();
+    }
+
+    private void ClearArchiveText() => _archiveBase64 = string.Empty;
+
+    private RenderFragment ModSlider(string title, string prop) => builder =>
+    {
+        int seq = 0;
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "slider");
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "slider-h");
+
+        builder.OpenElement(seq++, "div");
+        builder.AddContent(seq++, title);
+        builder.CloseElement();
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "mono");
+        builder.AddContent(seq++, $"{GetMod(prop):0.00}");
+        builder.CloseElement();
+
+        builder.CloseElement();
+
+        builder.OpenElement(seq++, "input");
+        builder.AddAttribute(seq++, "class", "range");
+        builder.AddAttribute(seq++, "type", "range");
+        builder.AddAttribute(seq++, "min", "0");
+        builder.AddAttribute(seq++, "max", "1");
+        builder.AddAttribute(seq++, "step", "0.01");
+        builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetMod(prop)));
+        builder.AddAttribute(seq++, "oninput",
+            EventCallback.Factory.CreateBinder<string>(this, v => SetMod(prop, v), BindConverter.FormatValue(GetMod(prop))));
+        builder.CloseElement();
+
+        builder.CloseElement();
+    };
+
+    private float GetMod(string prop) => prop switch
+    {
+        nameof(UiModulators.Reward) => _mods.Reward,
+        nameof(UiModulators.Salience) => _mods.Salience,
+        nameof(UiModulators.Stability) => _mods.Stability,
+        nameof(UiModulators.Alerting) => _mods.Alerting,
+        nameof(UiModulators.Curiosity) => _mods.Curiosity,
+        nameof(UiModulators.Goal) => _mods.Goal,
+        _ => 0f
+    };
+
+    private void SetMod(string prop, string raw)
+    {
+        if (!float.TryParse(raw, out var v)) return;
+        v = Math.Clamp(v, 0f, 1f);
+
+        switch (prop)
+        {
+            case nameof(UiModulators.Reward): _mods.Reward = v; break;
+            case nameof(UiModulators.Salience): _mods.Salience = v; break;
+            case nameof(UiModulators.Stability): _mods.Stability = v; break;
+            case nameof(UiModulators.Alerting): _mods.Alerting = v; break;
+            case nameof(UiModulators.Curiosity): _mods.Curiosity = v; break;
+            case nameof(UiModulators.Goal): _mods.Goal = v; break;
+        }
+    }
+}
