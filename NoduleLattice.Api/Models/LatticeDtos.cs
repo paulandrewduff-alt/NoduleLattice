@@ -35,7 +35,7 @@ public sealed class ArchiveDto
 
 /// <summary>
 /// Explicit sensory stimulation request.
-/// Group is reserved for future modality routing; currently Group=0 targets a default \"input band\".
+/// Group: 0=Vision, 1=Audio, 2=Body, 3=Internal (reserved).
 /// </summary>
 public sealed class StimulusRequest
 {
@@ -43,6 +43,18 @@ public sealed class StimulusRequest
     public float RateHz { get; init; } = 8f;
     public float Strength { get; init; } = 0.25f;
     public int Steps { get; init; } = 32;
+}
+
+/// <summary>
+/// Explicit thalamus gate settings (TRN-like per-channel gating).
+/// Values are clamped to [0..1].
+/// </summary>
+public sealed class ThalamusGatesRequest
+{
+    public float VisionGate { get; init; } = 1f;
+    public float AudioGate { get; init; } = 1f;
+    public float BodyGate { get; init; } = 1f;
+    public float InternalGate { get; init; } = 0.35f;
 }
 
 // Snapshot

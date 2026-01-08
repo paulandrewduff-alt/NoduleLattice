@@ -80,6 +80,9 @@ public sealed class LatticeApiClient
             Goal = mods.Goal
         });
 
+    public async Task SetThalamusGates(ThalamusGatesRequest req)
+        => await _http.PostAsJsonAsync("api/lattice/thalamus", req);
+
     public async Task SleepReplay()
         => await _http.PostAsJsonAsync("api/lattice/sleep-replay", new SleepReplayRequest { Run = true });
 

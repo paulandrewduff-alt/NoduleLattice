@@ -6,11 +6,11 @@ namespace NoduleLattice.Api.Services;
 
 /// <summary>
 /// Minimal, functional host for the lattice.
-/// Boot-sanity implementation so API + Swagger + Blazor UI run end-to-end.
-/// \n
-/// Updated in this entry:
-/// - Stronger, visually obvious dynamics (spiking + modulation gain)
-/// - Explicit sensory stimulation endpoint (Poisson drive into an input band)
+///
+/// Entry 013f:
+/// - Thalamus Phase 1: channels + gates + routing
+/// - Stimulus routes through thalamus into target regions
+/// - Gates are explicit, but modulators bias effective throughput (state)
 /// </summary>
 public sealed class LatticeHostService
 {
@@ -22,10 +22,11 @@ public sealed class LatticeHostService
     private readonly List<EdgeState> _edges = new();
 
     private ModulatorsRequest _mods = new();
+    private ThalamusState _thal = new();
 
     public LatticeHostService()
     {
-        // Create a small 3D cloud (sanity view)
+        // Small 3D cloud (sanity view)
         const int n = 240;
 
         for (int i = 0; i < n; i++)
@@ -59,6 +60,15 @@ public sealed class LatticeHostService
                 W = (float)(_rng.NextDouble() * 1.2)
             });
         }
+
+        // Default thalamus gates: sensory open, internal partially open
+        _thal = new ThalamusState
+        {
+            VisionGate = 1.0f,
+            AudioGate = 1.0f,
+            BodyGate = 1.0f,
+            InternalGate = 0.35f
+        };
     }
 
     public LatticeSnapshotDto GetSnapshot()
@@ -91,67 +101,7 @@ public sealed class LatticeHostService
     public void Step(int steps)
     {
         if (steps <= 0) return;
-
-        lock (_gate)
-        {
-            for (int s = 0; s < steps; s++)
-            {
-                _step++;
-
-                // Clear spike flags for this tick
-                foreach (var n in _nodes)
-                    n.Spiked = false;
-
-                // Quick lookup
-                var byId = _nodes.ToDictionary(x => x.Id);
-
-                // 1) Synaptic integration (stronger; should be visually obvious)
-                foreach (var e in _edges)
-                {
-                    if (!byId.TryGetValue(e.Pre, out var pre)) continue;
-                    if (!byId.TryGetValue(e.Post, out var post)) continue;
-
-                    float current = pre.V * e.W * 0.08f;
-                    if (e.Kind == 1) current = -current;
-
-                    post.V += current;
-                }
-
-                // 2) Modulators influence gain/noise/threshold
-                float reward = Clamp01(_mods.Reward);
-                float sal = Clamp01(_mods.Salience);
-                float stab = Clamp01(_mods.Stability);
-                float alert = Clamp01(_mods.Alerting);
-                float curiosity = Clamp01(_mods.Curiosity);
-                float goal = Clamp01(_mods.Goal);
-
-                float gain = 1.0f + 0.35f * alert + 0.25f * sal + 0.15f * curiosity + 0.10f * goal;
-                float noiseAmp = 0.08f * (1f - 0.70f * stab);
-
-                // 3) Per-neuron update (decay + noise + spike/reset)
-                foreach (var n in _nodes)
-                {
-                    float noise = ((float)_rng.NextDouble() * 2f - 1f) * noiseAmp;
-
-                    // decay + gain
-                    n.V = (n.V * 0.93f + noise) * gain;
-
-                    // excitability rises with reward/salience
-                    float thr = 1.0f - (0.12f * reward + 0.08f * sal);
-
-                    if (n.V > thr)
-                    {
-                        n.Spiked = true;
-                        n.V = -0.65f; // deeper reset to make spikes distinct
-                        n.Rate = Clamp01(n.Rate * 0.85f + 0.35f);
-                    }
-                    else
-                    {
-                        n.Rate = Clamp01(n.Rate * 0.92f + (MathF.Max(n.V, 0f) * 0.02f));
-                    }
-                }
-            }
-        }
+        lock (_gate) StepInternal_NoLock(steps);
     }
 
     public void Inject(InjectRequest req)
@@ -174,62 +124,100 @@ public sealed class LatticeHostService
         }
     }
 
+    public void SetThalamusGates(ThalamusGatesRequest req)
+    {
+        lock (_gate)
+        {
+            _thal.VisionGate = Clamp01(req.VisionGate);
+            _thal.AudioGate = Clamp01(req.AudioGate);
+            _thal.BodyGate = Clamp01(req.BodyGate);
+            _thal.InternalGate = Clamp01(req.InternalGate);
+        }
+    }
+
     public void SleepReplay(bool run)
     {
         if (!run) return;
 
-        // Minimal placeholder: run a chunk with high stability to reduce noise.
-        ModulatorsRequest saved;
+        // Minimal placeholder: close sensory gates, increase internal gate slightly.
+        ModulatorsRequest savedMods;
+        ThalamusState savedThal;
 
         lock (_gate)
         {
-            saved = _mods;
+            savedMods = _mods;
+            savedThal = _thal;
 
             _mods = new ModulatorsRequest
             {
-                Reward = saved.Reward,
-                Salience = saved.Salience,
-                Stability = MathF.Max(saved.Stability, 0.85f),
-                Alerting = saved.Alerting,
-                Curiosity = saved.Curiosity,
-                Goal = saved.Goal
+                Reward = savedMods.Reward,
+                Salience = savedMods.Salience,
+                Stability = MathF.Max(savedMods.Stability, 0.85f),
+                Alerting = MathF.Min(savedMods.Alerting, 0.15f),
+                Curiosity = savedMods.Curiosity,
+                Goal = savedMods.Goal
             };
-        }
 
-        Step(96);
+            _thal = new ThalamusState
+            {
+                VisionGate = 0.05f,
+                AudioGate = 0.05f,
+                BodyGate = 0.05f,
+                InternalGate = MathF.Max(savedThal.InternalGate, 0.55f)
+            };
 
-        lock (_gate)
-        {
-            _mods = saved;
+            StepInternal_NoLock(96);
+
+            _mods = savedMods;
+            _thal = savedThal;
         }
     }
 
     /// <summary>
-    /// Explicit sensory stimulation.
-    /// Current mapping: Group=0 targets an \"input band\" (nodes with X <= -5).
-    /// Applies a Poisson drive for the specified number of steps and advances dynamics.
+    /// Explicit sensory stimulation routed through thalamus.
+    /// Group: 0=Vision, 1=Audio, 2=Body, 3=Internal (reserved).
+    ///
+    /// Implementation:
+    /// - Generate Poisson events from the channel source band
+    /// - Route each event into the channel target region, scaled by EffectiveGate
+    /// - Advance dynamics each tick
     /// </summary>
     public void Stimulus(StimulusRequest req)
     {
-        // This method calls Step(1) internally; we avoid nested lock deadlocks by locking once and using an internal stepping routine.
         lock (_gate)
         {
-            var band = SelectStimulusGroup(req.Group);
-            if (band.Count == 0) return;
+            var sources = SelectSourceBand(req.Group);
+            var targets = SelectTargetRegion(req.Group);
+            if (targets.Count == 0) return;
 
-            // Poisson drive per tick: p = rateHz * dt; choose dt=0.02 (~50Hz tick)
+            // Poisson per tick: p = rateHz * dt; choose dt=0.02 (~50Hz)
             float dt = 0.02f;
             float p = Math.Clamp(req.RateHz * dt, 0f, 1f);
-            float amp = req.Strength;
+            float baseAmp = req.Strength;
 
             int steps = Math.Max(1, req.Steps);
 
-            for (int i = 0; i < steps; i++)
+            for (int t = 0; t < steps; t++)
             {
-                foreach (var n in band)
+                float gEff = EffectiveGate(req.Group);
+                if (gEff > 0.0001f)
                 {
-                    if (_rng.NextDouble() < p)
-                        n.V += amp;
+                    // if a channel has no external sources (internal), we synthesize a small number of events
+                    int eventCount = sources.Count > 0 ? sources.Count : 12;
+
+                    for (int i = 0; i < eventCount; i++)
+                    {
+                        if (_rng.NextDouble() >= p) continue;
+
+                        // pick a target and inject
+                        var tgt = targets[_rng.Next(targets.Count)];
+
+                        // precision: higher stability -> less injection noise
+                        float precision = 0.55f + 0.40f * Clamp01(_mods.Stability);
+                        float noise = ((float)_rng.NextDouble() * 2f - 1f) * (1f - precision) * 0.08f;
+
+                        tgt.V += (baseAmp * gEff) + noise;
+                    }
                 }
 
                 StepInternal_NoLock(1);
@@ -245,6 +233,7 @@ public sealed class LatticeHostService
             {
                 Step = _step,
                 Mods = _mods,
+                Thal = _thal,
                 Nodes = _nodes,
                 Edges = _edges
             };
@@ -267,6 +256,7 @@ public sealed class LatticeHostService
 
             _step = payload.Step;
             _mods = payload.Mods ?? new ModulatorsRequest();
+            _thal = payload.Thal ?? new ThalamusState();
 
             _nodes.Clear();
             _nodes.AddRange(payload.Nodes ?? new List<NodeState>());
@@ -277,25 +267,68 @@ public sealed class LatticeHostService
     }
 
     // -----------------------
-    // Internals
+    // Thalamus helpers
     // -----------------------
 
-    private List<NodeState> SelectStimulusGroup(int group)
+    private float EffectiveGate(int group)
     {
-        // Reserved for future: group-based modality routing.
-        // For now, group 0 = default sensory band on the \"left\" (X <= -5).
+        // explicit base gates
+        float baseGate = group switch
+        {
+            0 => _thal.VisionGate,
+            1 => _thal.AudioGate,
+            2 => _thal.BodyGate,
+            3 => _thal.InternalGate,
+            _ => 1f
+        };
+
+        // state effect: alerting opens throughput, stability reduces disruptive variability
+        float alert = Clamp01(_mods.Alerting);
+        float stab = Clamp01(_mods.Stability);
+
+        float stateFactor = (0.55f + 0.60f * alert) * (0.80f + 0.20f * stab);
+
+        // top-down bias: goal opens sensory lanes selectively; salience opens whichever lane is being used
+        float goal = Clamp01(_mods.Goal);
+        float sal = Clamp01(_mods.Salience);
+
+        float bias = 1.0f + 0.25f * goal + 0.20f * sal;
+
+        return Clamp01(baseGate * stateFactor * bias);
+    }
+
+    private List<NodeState> SelectSourceBand(int group)
+    {
+        // External input interfaces.
         return group switch
         {
-            0 => _nodes.Where(n => n.X <= -5).ToList(),
-            _ => _nodes.Where(n => n.X <= -5).ToList()
+            0 => _nodes.Where(n => n.X <= -7).ToList(), // Vision afferents
+            1 => _nodes.Where(n => n.Z <= -7).ToList(), // Audio afferents
+            2 => _nodes.Where(n => n.Y <= -4).ToList(), // Body afferents
+            3 => new List<NodeState>(),                 // Internal has no external source band
+            _ => _nodes.Where(n => n.X <= -7).ToList()
         };
     }
 
+    private List<NodeState> SelectTargetRegion(int group)
+    {
+        // Cortical entry zones.
+        return group switch
+        {
+            0 => _nodes.Where(n => n.X >= +6).ToList(),
+            1 => _nodes.Where(n => n.Z >= +6).ToList(),
+            2 => _nodes.Where(n => n.Y >= +3).ToList(),
+            3 => _nodes.Where(n => Math.Abs(n.X) <= 2 && Math.Abs(n.Y) <= 2 && Math.Abs(n.Z) <= 2).ToList(),
+            _ => _nodes.Where(n => Math.Abs(n.X) <= 2 && Math.Abs(n.Y) <= 2 && Math.Abs(n.Z) <= 2).ToList()
+        };
+    }
+
+    // -----------------------
+    // Dynamics
+    // -----------------------
+
     private void StepInternal_NoLock(int steps)
     {
-        // Same as Step, but assumes _gate is already held.
-        if (steps <= 0) return;
-
         for (int s = 0; s < steps; s++)
         {
             _step++;
@@ -305,6 +338,7 @@ public sealed class LatticeHostService
 
             var byId = _nodes.ToDictionary(x => x.Id);
 
+            // 1) Synaptic integration (strong)
             foreach (var e in _edges)
             {
                 if (!byId.TryGetValue(e.Pre, out var pre)) continue;
@@ -316,6 +350,7 @@ public sealed class LatticeHostService
                 post.V += current;
             }
 
+            // 2) Modulators influence gain/noise/threshold
             float reward = Clamp01(_mods.Reward);
             float sal = Clamp01(_mods.Salience);
             float stab = Clamp01(_mods.Stability);
@@ -329,6 +364,7 @@ public sealed class LatticeHostService
             foreach (var n in _nodes)
             {
                 float noise = ((float)_rng.NextDouble() * 2f - 1f) * noiseAmp;
+
                 n.V = (n.V * 0.93f + noise) * gain;
 
                 float thr = 1.0f - (0.12f * reward + 0.08f * sal);
@@ -347,14 +383,27 @@ public sealed class LatticeHostService
         }
     }
 
+    // -----------------------
+    // Archive + helpers
+    // -----------------------
+
     private static float Clamp01(float v) => v < 0f ? 0f : (v > 1f ? 1f : v);
 
     private sealed class ArchivePayload
     {
         public long Step { get; set; }
         public ModulatorsRequest? Mods { get; set; }
+        public ThalamusState? Thal { get; set; }
         public List<NodeState>? Nodes { get; set; }
         public List<EdgeState>? Edges { get; set; }
+    }
+
+    private sealed class ThalamusState
+    {
+        public float VisionGate { get; set; } = 1f;
+        public float AudioGate { get; set; } = 1f;
+        public float BodyGate { get; set; } = 1f;
+        public float InternalGate { get; set; } = 0.35f;
     }
 
     private sealed class NodeState
