@@ -1,5 +1,7 @@
 ﻿@page "/"
 
+@using NoduleLattice.Blazor.Components.Controls
+
 <h1>Sanity View</h1>
 
 @if (!string.IsNullOrWhiteSpace(_apiStatus))
@@ -13,7 +15,43 @@
     </div>
 }
 
-<div class="grid">
+<style>
+    .layout {
+        display: grid;
+        grid-template-columns: 1.35fr 0.65fr;
+        gap: 1rem;
+        align-items: start;
+    }
+
+        .layout.dock-collapsed {
+            grid-template-columns: 1fr 52px;
+        }
+
+    @@media (max-width: 1100px) {
+        .layout, .layout.dock-collapsed {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .compact-actions {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        margin-top: 0.75rem;
+    }
+
+    .inline-warn {
+        border: 1px solid #2a2a2a;
+        border-radius: 12px;
+        padding: 0.5rem 0.6rem;
+        margin: 0.5rem 0 0.25rem 0;
+        opacity: 0.9;
+    }
+</style>
+
+<div class="layout @(_dockCollapsed ? "dock-collapsed" : "")">
+
+    <!-- LEFT: Big 3D view -->
     <section class="card">
         <header class="card-h">
             <div>
@@ -23,9 +61,9 @@
             <div class="pill">Step: @_stepIndex</div>
         </header>
 
-        <Network3D Snapshot="_snapshot" HeightPx="520" />
+        <Network3D Snapshot="_snapshot" HeightPx="680" />
 
-        <div class="row" style="margin-top:0.75rem;">
+        <div class="compact-actions">
             <button class="btn" @onclick="Refresh">Refresh</button>
             <button class="btn" @onclick="() => Step(1)">Step 1</button>
             <button class="btn" @onclick="() => Step(16)">Step 16</button>
@@ -37,137 +75,18 @@
         </div>
     </section>
 
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Thalamus Gates</div>
-                <div class="h-sub">TRN-like gating • routing: Vision→V1, Audio→A1, Body→S1, Internal→Core</div>
-            </div>
-        </header>
+    <!-- RIGHT: Collapsible ControlDock -->
+    <ControlDock Title="Controls"
+                 Subtitle="Tabbed panels • collapse to free 3D space"
+                 ActiveBadge="@_dockBadge"
+                 @bind-Collapsed="_dockCollapsed"
+                 Thalamus="@ThalamusPanel"
+                 Modulators="@ModulatorsPanel"
+                 Stimulus="@StimulusPanel"
+                 Hippocampus="@HippocampusPanel"
+                 Injection="@InjectionPanel"
+                 Archive="@ArchivePanel" />
 
-        <div class="form">
-            @GateSlider("Vision Gate", nameof(_gVision))
-            @GateSlider("Audio Gate", nameof(_gAudio))
-            @GateSlider("Body Gate", nameof(_gBody))
-            @GateSlider("Internal Gate", nameof(_gInternal))
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="ApplyGates">Apply</button>
-                <button class="btn" @onclick="PresetFocusVision">Focus Vision</button>
-                <button class="btn" @onclick="PresetFocusAudio">Focus Audio</button>
-            </div>
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="PresetBodyAwareness">Body</button>
-                <button class="btn" @onclick="PresetIdle">Idle</button>
-                <button class="btn" @onclick="PresetSleep">Sleep</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Modulators</div>
-                <div class="h-sub">Explicit control only • biases effective gating and dynamics</div>
-            </div>
-        </header>
-
-        <div class="form">
-            @ModSlider("Reward", nameof(UiModulators.Reward))
-            @ModSlider("Salience", nameof(UiModulators.Salience))
-            @ModSlider("Stability", nameof(UiModulators.Stability))
-            @ModSlider("Alerting", nameof(UiModulators.Alerting))
-            @ModSlider("Curiosity", nameof(UiModulators.Curiosity))
-            @ModSlider("Goal", nameof(UiModulators.Goal))
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="ApplyModulators">Apply</button>
-                <button class="btn" @onclick="ZeroModulators">Zero</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Stimulus (Routed)</div>
-                <div class="h-sub">Group: 0=Vision, 1=Audio, 2=Body, 3=Internal • passes through thalamus gate</div>
-            </div>
-        </header>
-
-        <div class="form">
-            <label>Group</label>
-            <select class="input" @bind="_stimGroup">
-                <option value="0">Vision</option>
-                <option value="1">Audio</option>
-                <option value="2">Body</option>
-                <option value="3">Internal</option>
-            </select>
-
-            <label>Rate (Hz)</label>
-            <input class="input" type="number" step="1" @bind="_stimRateHz" />
-
-            <label>Strength</label>
-            <input class="input" type="number" step="0.01" @bind="_stimStrength" />
-
-            <label>Steps</label>
-            <input class="input" type="number" step="1" @bind="_stimSteps" />
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="RunStimulus">Stimulate</button>
-                <div class="spacer"></div>
-                <button class="btn" @onclick="Refresh">Refresh</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Injection</div>
-                <div class="h-sub">External input only (exc/inh) • explicit action</div>
-            </div>
-        </header>
-
-        <div class="form">
-            <label>Node Id</label>
-            <input class="input" type="number" @bind="_inject.NodeId" />
-
-            <label>Exc</label>
-            <input class="input" type="number" step="0.01" @bind="_inject.Exc" />
-
-            <label>Inh</label>
-            <input class="input" type="number" step="0.01" @bind="_inject.Inh" />
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="Inject">Inject</button>
-                <div class="spacer"></div>
-                <button class="btn" @onclick="Refresh">Refresh</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Archive</div>
-                <div class="h-sub">Save/Load engine state</div>
-            </div>
-        </header>
-
-        <div class="form">
-            <div class="row">
-                <button class="btn" @onclick="SaveArchive">Save</button>
-                <button class="btn" @onclick="LoadArchive">Load</button>
-                <div class="spacer"></div>
-                <button class="btn" @onclick="ClearArchiveText">Clear</button>
-            </div>
-
-            <label>Base64 Archive</label>
-            <textarea class="textarea" rows="8" @bind="_archiveBase64"></textarea>
-        </div>
-    </section>
 </div>
 
 @code {
@@ -191,15 +110,37 @@
     private float _stimStrength = 0.25f;
     private int _stimSteps = 32;
 
+    // Hippocampus controls
+    private bool _hipCaptureEnabled = true;
+    private float _hipSalThr = 0.60f;
+    private float _hipAltThr = 0.40f;
+    private int _hipTopK = 18;
+    private int _hipMax = 256;
+    private float _hipDecay = 0.0015f;
+    private float _hipMin = 0.06f;
+
+    private int _hipReplayCount = 8;
+    private float _hipReplayGain = 1.0f;
+    private int _hipReplaySteps = 10;
+
+    private HippocampusEpisodeListDto? _hipList;
+    private int _hipEpisodesCount;
+    private string _hipError = string.Empty;
+
     private string _archiveBase64 = string.Empty;
 
     private string _apiStatus = string.Empty;
     private string _apiError = string.Empty;
 
+    private bool _dockCollapsed;
+    private string _dockBadge => _dockCollapsed ? "" : "Controls";
+
     protected override async Task OnInitializedAsync()
     {
         await ApplyGates();
+        await ApplyHippocampus();
         await Refresh();
+        await RefreshHippocampus();
     }
 
     private async Task Refresh()
@@ -226,6 +167,7 @@
     {
         await Api.Step(n);
         await Refresh();
+        await RefreshHippocampus();
     }
 
     private async Task ApplyModulators()
@@ -260,6 +202,60 @@
     private void PresetIdle() { _gVision = 0.55f; _gAudio = 0.55f; _gBody = 0.55f; _gInternal = 0.35f; }
     private void PresetSleep() { _gVision = 0.05f; _gAudio = 0.05f; _gBody = 0.05f; _gInternal = 0.60f; }
 
+    private async Task ApplyHippocampus()
+    {
+        var req = new HippocampusConfigRequest
+        {
+            CaptureEnabled = _hipCaptureEnabled,
+            CaptureSalienceThreshold = _hipSalThr,
+            CaptureAlertingThreshold = _hipAltThr,
+            TopK = _hipTopK,
+            MaxEpisodes = _hipMax,
+            DecayPerStep = _hipDecay,
+            MinStrength = _hipMin
+        };
+
+        await Api.SetHippocampusConfig(req);
+        await RefreshHippocampus();
+    }
+
+    private async Task RefreshHippocampus()
+    {
+        _hipError = string.Empty;
+
+        var list = await Api.GetHippocampusEpisodes();
+        if (list is null)
+        {
+            _hipList = null;
+            _hipEpisodesCount = 0;
+            _hipError = Api.LastError ?? "Failed to load hippocampus episodes.";
+            return;
+        }
+
+        _hipList = list;
+        _hipEpisodesCount = _hipList.Episodes?.Count ?? 0;
+    }
+
+    private async Task ReplayHippocampus()
+    {
+        var req = new HippocampusReplayRequest
+        {
+            Count = _hipReplayCount,
+            Gain = _hipReplayGain,
+            StepsPerEpisode = _hipReplaySteps
+        };
+
+        await Api.ReplayHippocampus(req);
+        await Refresh();
+        await RefreshHippocampus();
+    }
+
+    private async Task ClearHippocampus()
+    {
+        await Api.ClearHippocampus();
+        await RefreshHippocampus();
+    }
+
     private async Task Inject()
     {
         await Api.Inject(_inject);
@@ -278,12 +274,14 @@
 
         await Api.Stimulus(req);
         await Refresh();
+        await RefreshHippocampus();
     }
 
     private async Task SleepReplay()
     {
         await Api.SleepReplay();
         await Refresh();
+        await RefreshHippocampus();
     }
 
     private async Task SaveArchive()
@@ -297,126 +295,313 @@
         if (string.IsNullOrWhiteSpace(_archiveBase64)) return;
         await Api.LoadArchive(new ArchiveDto { Base64 = _archiveBase64.Trim() });
         await Refresh();
+        await RefreshHippocampus();
     }
 
     private void ClearArchiveText() => _archiveBase64 = string.Empty;
 
-    private RenderFragment GateSlider(string title, string field) => builder =>
+    // ------------------------------
+    // Panels (passed into ControlDock)
+    // ------------------------------
+
+    private RenderFragment ThalamusPanel => @<div>
+        <div class="h-sub" style="margin-bottom:0.6rem;">TRN-like gating • routing: Vision→V1, Audio→A1, Body→S1, Internal→Core</div>
+        <div class="form">
+            @GateSlider("Vision Gate", nameof(_gVision))
+            @GateSlider("Audio Gate", nameof(_gAudio))
+            @GateSlider("Body Gate", nameof(_gBody))
+            @GateSlider("Internal Gate", nameof(_gInternal))
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="ApplyGates">Apply</button>
+                <button class="btn" @onclick="PresetFocusVision">Focus Vision</button>
+                <button class="btn" @onclick="PresetFocusAudio">Focus Audio</button>
+            </div>
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="PresetBodyAwareness">Body</button>
+                <button class="btn" @onclick="PresetIdle">Idle</button>
+                <button class="btn" @onclick="PresetSleep">Sleep</button>
+            </div>
+        </div>
+    </div>;
+
+    private RenderFragment ModulatorsPanel => @<div>
+        <div class="h-sub" style="margin-bottom:0.6rem;">Explicit control only • biases effective gating and dynamics</div>
+        <div class="form">
+            @ModSlider("Reward", nameof(UiModulators.Reward))
+            @ModSlider("Salience", nameof(UiModulators.Salience))
+            @ModSlider("Stability", nameof(UiModulators.Stability))
+            @ModSlider("Alerting", nameof(UiModulators.Alerting))
+            @ModSlider("Curiosity", nameof(UiModulators.Curiosity))
+            @ModSlider("Goal", nameof(UiModulators.Goal))
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="ApplyModulators">Apply</button>
+                <button class="btn" @onclick="ZeroModulators">Zero</button>
+            </div>
+        </div>
+    </div>;
+
+    private RenderFragment StimulusPanel => @<div>
+        <div class="h-sub" style="margin-bottom:0.6rem;">Group: 0=Vision, 1=Audio, 2=Body, 3=Internal • passes through thalamus gate</div>
+        <div class="form">
+            <label>Group</label>
+            <select class="input" @bind="_stimGroup">
+                <option value="0">Vision</option>
+                <option value="1">Audio</option>
+                <option value="2">Body</option>
+                <option value="3">Internal</option>
+            </select>
+
+            <label>Rate (Hz)</label>
+            <input class="input" type="number" step="1" @bind="_stimRateHz" />
+
+            <label>Strength</label>
+            <input class="input" type="number" step="0.01" @bind="_stimStrength" />
+
+            <label>Steps</label>
+            <input class="input" type="number" step="1" @bind="_stimSteps" />
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="RunStimulus">Stimulate</button>
+                <div class="spacer"></div>
+                <button class="btn" @onclick="Refresh">Refresh</button>
+            </div>
+        </div>
+    </div>;
+
+    private RenderFragment HippocampusPanel => @<div>
+    <div class="h-sub" style="margin-bottom:0.6rem;">Episodic capture (decay) + replay into Internal channel • inspectable</div>
+
+@if (!string.IsNullOrWhiteSpace(_hipError))
     {
-        int seq = 0;
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider");
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider-h");
-
-        builder.OpenElement(seq++, "div");
-        builder.AddContent(seq++, title);
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "mono");
-        builder.AddContent(seq++, $"{GetGate(field):0.00}");
-        builder.CloseElement();
-
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "input");
-        builder.AddAttribute(seq++, "class", "range");
-        builder.AddAttribute(seq++, "type", "range");
-        builder.AddAttribute(seq++, "min", "0");
-        builder.AddAttribute(seq++, "max", "1");
-        builder.AddAttribute(seq++, "step", "0.01");
-        builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetGate(field)));
-        builder.AddAttribute(seq++, "oninput",
-            EventCallback.Factory.CreateBinder<string>(this, v => SetGate(field, v), BindConverter.FormatValue(GetGate(field))));
-        builder.CloseElement();
-
-        builder.CloseElement();
-    };
-
-    private float GetGate(string field) => field switch
-    {
-        nameof(_gVision) => _gVision,
-        nameof(_gAudio) => _gAudio,
-        nameof(_gBody) => _gBody,
-        nameof(_gInternal) => _gInternal,
-        _ => 0f
-    };
-
-    private void SetGate(string field, string raw)
-    {
-        if (!float.TryParse(raw, out var v)) return;
-        v = Math.Clamp(v, 0f, 1f);
-
-        switch (field)
-        {
-            case nameof(_gVision): _gVision = v; break;
-            case nameof(_gAudio): _gAudio = v; break;
-            case nameof(_gBody): _gBody = v; break;
-            case nameof(_gInternal): _gInternal = v; break;
-        }
+    <div class="inline-warn mono">Hippocampus: @_hipError</div>
     }
 
-    private RenderFragment ModSlider(string title, string prop) => builder =>
+    <div class="form">
+        <label>Capture Enabled</label>
+        <input type="checkbox" @bind="_hipCaptureEnabled" />
+
+        <label>Capture Salience Threshold</label>
+        <input class="input" type="number" step="0.01" @bind="_hipSalThr" />
+
+        <label>Capture Alerting Threshold</label>
+        <input class="input" type="number" step="0.01" @bind="_hipAltThr" />
+
+        <label>Top-K</label>
+        <input class="input" type="number" step="1" @bind="_hipTopK" />
+
+        <label>Max Episodes</label>
+        <input class="input" type="number" step="1" @bind="_hipMax" />
+
+        <label>Decay Per Step</label>
+        <input class="input" type="number" step="0.0001" @bind="_hipDecay" />
+
+        <label>Min Strength</label>
+        <input class="input" type="number" step="0.01" @bind="_hipMin" />
+
+        <div class="row" style="margin-top:0.5rem;">
+            <button class="btn" @onclick="ApplyHippocampus">Apply</button>
+            <button class="btn" @onclick="RefreshHippocampus">Refresh List</button>
+            <div class="spacer"></div>
+            <button class="btn" @onclick="ClearHippocampus">Clear</button>
+        </div>
+
+        <hr />
+
+        <label>Replay Count</label>
+        <input class="input" type="number" step="1" @bind="_hipReplayCount" />
+
+        <label>Replay Gain</label>
+        <input class="input" type="number" step="0.1" @bind="_hipReplayGain" />
+
+        <label>Steps Per Episode</label>
+        <input class="input" type="number" step="1" @bind="_hipReplaySteps" />
+
+        <div class="row" style="margin-top:0.5rem;">
+            <button class="btn" @onclick="ReplayHippocampus">Replay</button>
+            <div class="spacer"></div>
+            <span class="pill">Episodes: @_hipEpisodesCount</span>
+        </div>
+
+        <hr />
+
+        @if (_hipList is not null)
+                {
+        <div class="mono" style="margin-bottom:0.5rem;">CurrentStep: @_hipList.CurrentStep</div>
+
+        <div style="max-height:260px; overflow:auto;">
+            @foreach (var ep in _hipList.Episodes.OrderByDescending(e => e.Strength).Take(64))
+                        {
+                        var age = _hipList.CurrentStep - ep.CapturedAtStep;
+                <div class="mono" style="padding:0.25rem 0; border-bottom:1px solid #2a2a2a;">
+                    <span>Ep @ep.Id</span>
+                    <span> | age @age</span>
+                    <span> | str @ep.Strength.ToString("0.00")</span>
+                    <span> | k @ep.NodeIds.Length</span>
+                </div>
+            }
+        </div>
+                }
+    </div>
+</div>;
+
+    private RenderFragment InjectionPanel => @<div>
+    <div class="h-sub" style="margin-bottom:0.6rem;">External input only (exc/inh) • explicit action</div>
+    <div class="form">
+        <label>Node Id</label>
+        <input class="input" type="number" @bind="_inject.NodeId" />
+
+        <label>Exc</label>
+        <input class="input" type="number" step="0.01" @bind="_inject.Exc" />
+
+        <label>Inh</label>
+        <input class="input" type="number" step="0.01" @bind="_inject.Inh" />
+
+        <div class="row" style="margin-top:0.5rem;">
+            <button class="btn" @onclick="Inject">Inject</button>
+            <div class="spacer"></div>
+            <button class="btn" @onclick="Refresh">Refresh</button>
+        </div>
+    </div>
+</div>;
+
+private RenderFragment ArchivePanel => @<div>
+    <div class="h-sub" style="margin-bottom:0.6rem;">Save/Load engine state (includes hippocampus episodes)</div>
+    <div class="form">
+        <div class="row">
+            <button class="btn" @onclick="SaveArchive">Save</button>
+            <button class="btn" @onclick="LoadArchive">Load</button>
+            <div class="spacer"></div>
+            <button class="btn" @onclick="ClearArchiveText">Clear</button>
+        </div>
+
+        <label>Base64 Archive</label>
+        <textarea class="textarea" rows="10" @bind="_archiveBase64"></textarea>
+    </div>
+</div>;
+
+// ------------------------------
+// Shared slider fragments
+// ------------------------------
+
+private RenderFragment GateSlider(string title, string field) => builder =>
+{
+    int seq = 0;
+    builder.OpenElement(seq++, "div");
+    builder.AddAttribute(seq++, "class", "slider");
+
+    builder.OpenElement(seq++, "div");
+    builder.AddAttribute(seq++, "class", "slider-h");
+
+    builder.OpenElement(seq++, "div");
+    builder.AddContent(seq++, title);
+    builder.CloseElement();
+
+    builder.OpenElement(seq++, "div");
+    builder.AddAttribute(seq++, "class", "mono");
+    builder.AddContent(seq++, $"{GetGate(field):0.00}");
+    builder.CloseElement();
+
+    builder.CloseElement();
+
+    builder.OpenElement(seq++, "input");
+    builder.AddAttribute(seq++, "class", "range");
+    builder.AddAttribute(seq++, "type", "range");
+    builder.AddAttribute(seq++, "min", "0");
+    builder.AddAttribute(seq++, "max", "1");
+    builder.AddAttribute(seq++, "step", "0.01");
+    builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetGate(field)));
+    builder.AddAttribute(seq++, "oninput",
+        EventCallback.Factory.CreateBinder<string>(this, v => SetGate(field, v), BindConverter.FormatValue(GetGate(field))));
+    builder.CloseElement();
+
+    builder.CloseElement();
+};
+
+private float GetGate(string field) => field switch
+{
+    nameof(_gVision) => _gVision,
+    nameof(_gAudio) => _gAudio,
+    nameof(_gBody) => _gBody,
+    nameof(_gInternal) => _gInternal,
+    _ => 0f
+};
+
+private void SetGate(string field, string raw)
+{
+    if (!float.TryParse(raw, out var v)) return;
+    v = Math.Clamp(v, 0f, 1f);
+
+    switch (field)
     {
-        int seq = 0;
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider");
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider-h");
-
-        builder.OpenElement(seq++, "div");
-        builder.AddContent(seq++, title);
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "mono");
-        builder.AddContent(seq++, $"{GetMod(prop):0.00}");
-        builder.CloseElement();
-
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "input");
-        builder.AddAttribute(seq++, "class", "range");
-        builder.AddAttribute(seq++, "type", "range");
-        builder.AddAttribute(seq++, "min", "0");
-        builder.AddAttribute(seq++, "max", "1");
-        builder.AddAttribute(seq++, "step", "0.01");
-        builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetMod(prop)));
-        builder.AddAttribute(seq++, "oninput",
-            EventCallback.Factory.CreateBinder<string>(this, v => SetMod(prop, v), BindConverter.FormatValue(GetMod(prop))));
-        builder.CloseElement();
-
-        builder.CloseElement();
-    };
-
-    private float GetMod(string prop) => prop switch
-    {
-        nameof(UiModulators.Reward) => _mods.Reward,
-        nameof(UiModulators.Salience) => _mods.Salience,
-        nameof(UiModulators.Stability) => _mods.Stability,
-        nameof(UiModulators.Alerting) => _mods.Alerting,
-        nameof(UiModulators.Curiosity) => _mods.Curiosity,
-        nameof(UiModulators.Goal) => _mods.Goal,
-        _ => 0f
-    };
-
-    private void SetMod(string prop, string raw)
-    {
-        if (!float.TryParse(raw, out var v)) return;
-        v = Math.Clamp(v, 0f, 1f);
-
-        switch (prop)
-        {
-            case nameof(UiModulators.Reward): _mods.Reward = v; break;
-            case nameof(UiModulators.Salience): _mods.Salience = v; break;
-            case nameof(UiModulators.Stability): _mods.Stability = v; break;
-            case nameof(UiModulators.Alerting): _mods.Alerting = v; break;
-            case nameof(UiModulators.Curiosity): _mods.Curiosity = v; break;
-            case nameof(UiModulators.Goal): _mods.Goal = v; break;
-        }
+        case nameof(_gVision): _gVision = v; break;
+        case nameof(_gAudio): _gAudio = v; break;
+        case nameof(_gBody): _gBody = v; break;
+        case nameof(_gInternal): _gInternal = v; break;
     }
+}
+
+private RenderFragment ModSlider(string title, string prop) => builder =>
+{
+    int seq = 0;
+
+    builder.OpenElement(seq++, "div");
+    builder.AddAttribute(seq++, "class", "slider");
+
+    builder.OpenElement(seq++, "div");
+    builder.AddAttribute(seq++, "class", "slider-h");
+
+    builder.OpenElement(seq++, "div");
+    builder.AddContent(seq++, title);
+    builder.CloseElement();
+
+    builder.OpenElement(seq++, "div");
+    builder.AddAttribute(seq++, "class", "mono");
+    builder.AddContent(seq++, $"{GetMod(prop):0.00}");
+    builder.CloseElement();
+
+    builder.CloseElement();
+
+    builder.OpenElement(seq++, "input");
+    builder.AddAttribute(seq++, "class", "range");
+    builder.AddAttribute(seq++, "type", "range");
+    builder.AddAttribute(seq++, "min", "0");
+    builder.AddAttribute(seq++, "max", "1");
+    builder.AddAttribute(seq++, "step", "0.01");
+    builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetMod(prop)));
+    builder.AddAttribute(seq++, "oninput",
+        EventCallback.Factory.CreateBinder<string>(this, v => SetMod(prop, v), BindConverter.FormatValue(GetMod(prop))));
+    builder.CloseElement();
+
+    builder.CloseElement();
+};
+
+private float GetMod(string prop) => prop switch
+{
+    nameof(UiModulators.Reward) => _mods.Reward,
+    nameof(UiModulators.Salience) => _mods.Salience,
+    nameof(UiModulators.Stability) => _mods.Stability,
+    nameof(UiModulators.Alerting) => _mods.Alerting,
+    nameof(UiModulators.Curiosity) => _mods.Curiosity,
+    nameof(UiModulators.Goal) => _mods.Goal,
+    _ => 0f
+};
+
+private void SetMod(string prop, string raw)
+{
+    if (!float.TryParse(raw, out var v)) return;
+    v = Math.Clamp(v, 0f, 1f);
+
+    switch (prop)
+    {
+        case nameof(UiModulators.Reward): _mods.Reward = v; break;
+        case nameof(UiModulators.Salience): _mods.Salience = v; break;
+        case nameof(UiModulators.Stability): _mods.Stability = v; break;
+        case nameof(UiModulators.Alerting): _mods.Alerting = v; break;
+        case nameof(UiModulators.Curiosity): _mods.Curiosity = v; break;
+        case nameof(UiModulators.Goal): _mods.Goal = v; break;
+    }
+}
 }

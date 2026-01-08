@@ -61,6 +61,37 @@ public sealed class LatticeController : ControllerBase
         return Ok();
     }
 
+    // ----------------------------
+    // Hippocampus
+    // ----------------------------
+
+    [HttpGet("hippocampus/episodes")]
+    public ActionResult<HippocampusEpisodeListDto> HippocampusEpisodes()
+        => Ok(_host.GetHippocampusEpisodes());
+
+    [HttpPost("hippocampus/config")]
+    public IActionResult HippocampusConfig([FromBody] HippocampusConfigRequest req)
+    {
+        _host.SetHippocampusConfig(req);
+        return Ok();
+    }
+
+    [HttpPost("hippocampus/replay")]
+    public IActionResult HippocampusReplay([FromBody] HippocampusReplayRequest req)
+    {
+        _host.ReplayHippocampus(req);
+        return Ok();
+    }
+
+    [HttpPost("hippocampus/clear")]
+    public IActionResult HippocampusClear()
+    {
+        _host.ClearHippocampus();
+        return Ok();
+    }
+
+    // ----------------------------
+
     [HttpGet("archive")]
     public ActionResult<ArchiveDto> GetArchive()
         => Ok(_host.SaveArchive());
