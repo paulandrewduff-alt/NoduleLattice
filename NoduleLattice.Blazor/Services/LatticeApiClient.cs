@@ -1,13 +1,8 @@
-﻿using System.Net;
-using System.Net.Http.Json;
-using NoduleLattice.Blazor.Models;
+﻿using NoduleLattice.Blazor.Models;
+using System.Net;
 
 namespace NoduleLattice.Blazor.Services;
 
-/// <summary>
-/// Snapshot-only client to NoduleLattice.Api.
-/// Includes simple snapshot endpoint discovery and explicit action calls.
-/// </summary>
 public sealed class LatticeApiClient
 {
     private readonly HttpClient _http;
@@ -88,6 +83,49 @@ public sealed class LatticeApiClient
 
     public async Task Stimulus(StimulusRequest req)
         => await _http.PostAsJsonAsync("api/lattice/stimulus", req);
+
+    // -----------------
+    // Hippocampus
+    // -----------------
+
+    public async Task SetHippocampusConfig(HippocampusConfigRequest req)
+        => await _http.PostAsJsonAsync("api/lattice/hippocampus/config", req);
+
+    public async Task<HippocampusEpisodeListDto?> GetHippocampusEpisodes()
+    {
+        try
+        {
+            LastError = null;
+            using var resp = await _http.GetAsync("api/lattice/hippocampus/episodes");
+
+            if (resp.StatusCode == HttpStatusCode.NotFound)
+            {
+                LastError = "Hippocampus endpoint not found (404).";
+                return null;
+            }
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                LastError = $"Hippocampus endpoint error: {(int)resp.StatusCode} {resp.ReasonPhrase}";
+                return null;
+            }
+
+            return await resp.Content.ReadFromJsonAsync<HippocampusEpisodeListDto>();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            return null;
+        }
+    }
+
+    public async Task ReplayHippocampus(HippocampusReplayRequest req)
+        => await _http.PostAsJsonAsync("api/lattice/hippocampus/replay", req);
+
+    public async Task ClearHippocampus()
+        => await _http.PostAsync("api/lattice/hippocampus/clear", content: null);
+
+    // -----------------
 
     public async Task<ArchiveDto> GetArchive()
         => (await _http.GetFromJsonAsync<ArchiveDto>("api/lattice/archive")) ?? new ArchiveDto();

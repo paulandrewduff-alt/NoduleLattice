@@ -35,7 +35,7 @@ public sealed class ArchiveDto
 
 /// <summary>
 /// Explicit sensory stimulation request.
-/// Group: 0=Vision, 1=Audio, 2=Body, 3=Internal (reserved).
+/// Group: 0=Vision, 1=Audio, 2=Body, 3=Internal.
 /// </summary>
 public sealed class StimulusRequest
 {
@@ -46,8 +46,7 @@ public sealed class StimulusRequest
 }
 
 /// <summary>
-/// Explicit thalamus gate settings (TRN-like per-channel gating).
-/// Values are clamped to [0..1].
+/// Explicit thalamus gate settings.
 /// </summary>
 public sealed class ThalamusGatesRequest
 {
@@ -55,6 +54,56 @@ public sealed class ThalamusGatesRequest
     public float AudioGate { get; init; } = 1f;
     public float BodyGate { get; init; } = 1f;
     public float InternalGate { get; init; } = 0.35f;
+}
+
+/// <summary>
+/// Hippocampus configuration (explicit).
+/// </summary>
+public sealed class HippocampusConfigRequest
+{
+    public bool CaptureEnabled { get; init; } = true;
+
+    public float CaptureSalienceThreshold { get; init; } = 0.60f;
+    public float CaptureAlertingThreshold { get; init; } = 0.40f;
+
+    public int TopK { get; init; } = 18;
+
+    public int MaxEpisodes { get; init; } = 256;
+
+    /// <summary>Multiplicative decay: strength *= (1 - DecayPerStep) each step.</summary>
+    public float DecayPerStep { get; init; } = 0.0015f;
+
+    public float MinStrength { get; init; } = 0.06f;
+}
+
+public sealed class HippocampusReplayRequest
+{
+    public int Count { get; init; } = 8;
+
+    /// <summary>Injected strength multiplier (applied to stored values).</summary>
+    public float Gain { get; init; } = 1.0f;
+
+    /// <summary>Steps to spread each episode replay across (adds dynamics between bursts).</summary>
+    public int StepsPerEpisode { get; init; } = 10;
+}
+
+public sealed class HippocampusEpisodeListDto
+{
+    public long CurrentStep { get; set; }
+    public List<HippocampusEpisodeDto> Episodes { get; set; } = new();
+}
+
+public sealed class HippocampusEpisodeDto
+{
+    public long Id { get; set; }
+    public long CapturedAtStep { get; set; }
+    public float Strength { get; set; }
+
+    public int[] NodeIds { get; set; } = Array.Empty<int>();
+    public float[] Values { get; set; } = Array.Empty<float>();
+
+    public ModulatorsRequest ContextMods { get; set; } = new();
+    public ThalamusGatesRequest ContextThalamus { get; set; } = new();
 }
 
 // Snapshot
@@ -80,7 +129,7 @@ public sealed class EdgeSnapDto
     public int Pre { get; set; }
     public int Post { get; set; }
     public float W { get; set; }
-    public int Kind { get; set; } // 0 excit, 1 inhib
+    public int Kind { get; set; }
 }
 
 public sealed class Pos3Dto

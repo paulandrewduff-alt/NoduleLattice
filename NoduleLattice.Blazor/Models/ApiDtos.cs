@@ -48,6 +48,43 @@ public sealed class ThalamusGatesRequest
     public float InternalGate { get; init; } = 0.35f;
 }
 
+public sealed class HippocampusConfigRequest
+{
+    public bool CaptureEnabled { get; init; } = true;
+    public float CaptureSalienceThreshold { get; init; } = 0.60f;
+    public float CaptureAlertingThreshold { get; init; } = 0.40f;
+    public int TopK { get; init; } = 18;
+    public int MaxEpisodes { get; init; } = 256;
+    public float DecayPerStep { get; init; } = 0.0015f;
+    public float MinStrength { get; init; } = 0.06f;
+}
+
+public sealed class HippocampusReplayRequest
+{
+    public int Count { get; init; } = 8;
+    public float Gain { get; init; } = 1.0f;
+    public int StepsPerEpisode { get; init; } = 10;
+}
+
+public sealed class HippocampusEpisodeListDto
+{
+    public long CurrentStep { get; set; }
+    public List<HippocampusEpisodeDto> Episodes { get; set; } = new();
+}
+
+public sealed class HippocampusEpisodeDto
+{
+    public long Id { get; set; }
+    public long CapturedAtStep { get; set; }
+    public float Strength { get; set; }
+
+    public int[] NodeIds { get; set; } = Array.Empty<int>();
+    public float[] Values { get; set; } = Array.Empty<float>();
+
+    public ModulatorsRequest ContextMods { get; set; } = new();
+    public ThalamusGatesRequest ContextThalamus { get; set; } = new();
+}
+
 public sealed class LatticeSnapshotDto
 {
     public long StepIndex { get; set; }

@@ -1,0 +1,249 @@
+﻿@using Microsoft.AspNetCore.Components
+
+<style>
+    .dock {
+        display: flex;
+        flex-direction: column;
+        min-width: 360px;
+    }
+
+        .dock.collapsed {
+            min-width: 52px;
+            width: 52px;
+            overflow: hidden;
+        }
+
+    .dock-head {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        justify-content: space-between;
+    }
+
+    .dock-title {
+        display: flex;
+        align-items: baseline;
+        gap: 0.6rem;
+        flex-wrap: wrap;
+    }
+
+        .dock-title .h-title {
+            margin: 0;
+        }
+
+    .dock-actions {
+        display: flex;
+        gap: 0.4rem;
+        align-items: center;
+    }
+
+    .dock-toggle {
+        border: 1px solid #2a2a2a;
+        background: #151515;
+        color: #e8e8e8;
+        width: 34px;
+        height: 34px;
+        border-radius: 999px;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        user-select: none;
+    }
+
+        .dock-toggle:hover {
+            filter: brightness(1.07);
+        }
+
+    .dock-collapsed-bar {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        padding-top: 0.35rem;
+    }
+
+    .dock-collapsed-pill {
+        writing-mode: vertical-rl;
+        transform: rotate(180deg);
+        border: 1px solid #2a2a2a;
+        border-radius: 999px;
+        padding: 0.6rem 0.35rem;
+        text-align: center;
+        font-size: 0.9rem;
+        opacity: 0.85;
+    }
+
+    .tabs {
+        display: flex;
+        gap: 0.35rem;
+        flex-wrap: wrap;
+        margin: 0.35rem 0 0.75rem 0;
+    }
+
+    .tabbtn {
+        border: 1px solid #2a2a2a;
+        background: #151515;
+        color: #e8e8e8;
+        padding: 0.45rem 0.6rem;
+        border-radius: 999px;
+        cursor: pointer;
+        font-size: 0.95rem;
+        line-height: 1;
+        user-select: none;
+    }
+
+        .tabbtn:hover {
+            filter: brightness(1.07);
+        }
+
+        .tabbtn.active {
+            background: #1e1e1e;
+            border-color: #3a3a3a;
+            box-shadow: 0 0 0 1px rgba(255,255,255,0.04) inset;
+        }
+
+    .tabpanel {
+        margin-top: 0.25rem;
+    }
+
+    @@media (max-width: 1100px) {
+        .dock {
+            min-width: unset;
+        }
+
+            .dock.collapsed {
+                width: 100%;
+                min-width: unset;
+            }
+
+        .dock-collapsed-pill {
+            writing-mode: unset;
+            transform: none;
+        }
+    }
+</style>
+
+<section class="card dock @(Collapsed ? "collapsed" : "")">
+    <header class="card-h dock-head">
+        @if (!Collapsed)
+        {
+            <div class="dock-title">
+                <div>
+                    <div class="h-title">@Title</div>
+                    @if (!string.IsNullOrWhiteSpace(Subtitle))
+                    {
+                        <div class="h-sub">@Subtitle</div>
+                    }
+                </div>
+                @if (!string.IsNullOrWhiteSpace(ActiveBadge))
+                {
+                    <div class="pill">@ActiveBadge</div>
+                }
+            </div>
+        }
+
+        <div class="dock-actions">
+            <button type="button" class="dock-toggle" title="@(Collapsed ? "Expand controls" : "Collapse controls")" @onclick="Toggle">
+                @if (Collapsed)
+                {
+                    <span aria-hidden="true">⟩</span>
+                }
+                else
+                {
+                    <span aria-hidden="true">⟨</span>
+                }
+            </button>
+        </div>
+    </header>
+
+    @if (Collapsed)
+    {
+        <div class="dock-collapsed-bar">
+            <div class="dock-collapsed-pill">@Title</div>
+        </div>
+    }
+    else
+    {
+        <div class="tabs">
+            @TabButton(TabKey.Thalamus, "Thalamus")
+            @TabButton(TabKey.Modulators, "Modulators")
+            @TabButton(TabKey.Stimulus, "Stimulus")
+            @TabButton(TabKey.Hippocampus, "Hippocampus")
+            @TabButton(TabKey.Injection, "Injection")
+            @TabButton(TabKey.Archive, "Archive")
+        </div>
+
+        <div class="tabpanel">
+            @switch (_active)
+            {
+                case TabKey.Thalamus:
+                    @Thalamus
+                    break;
+                case TabKey.Modulators:
+                    @Modulators
+                    break;
+                case TabKey.Stimulus:
+                    @Stimulus
+                    break;
+                case TabKey.Hippocampus:
+                    @Hippocampus
+                    break;
+                case TabKey.Injection:
+                    @Injection
+                    break;
+                case TabKey.Archive:
+                    @Archive
+                    break;
+            }
+        </div>
+    }
+</section>
+
+@code {
+    public enum TabKey
+    {
+        Thalamus,
+        Modulators,
+        Stimulus,
+        Hippocampus,
+        Injection,
+        Archive
+    }
+
+    private TabKey _active = TabKey.Thalamus;
+
+    [Parameter] public string Title { get; set; } = "Controls";
+    [Parameter] public string? Subtitle { get; set; } = "";
+
+    /// <summary>Optional badge shown in header (e.g., active tab name).</summary>
+    [Parameter] public string? ActiveBadge { get; set; }
+
+    /// <summary>Two-way bindable collapsed state.</summary>
+    [Parameter] public bool Collapsed { get; set; }
+    [Parameter] public EventCallback<bool> CollapsedChanged { get; set; }
+
+    // Tab contents
+    [Parameter] public RenderFragment Thalamus { get; set; } = default!;
+    [Parameter] public RenderFragment Modulators { get; set; } = default!;
+    [Parameter] public RenderFragment Stimulus { get; set; } = default!;
+    [Parameter] public RenderFragment Hippocampus { get; set; } = default!;
+    [Parameter] public RenderFragment Injection { get; set; } = default!;
+    [Parameter] public RenderFragment Archive { get; set; } = default!;
+
+    private async Task Toggle()
+    {
+        Collapsed = !Collapsed;
+        await CollapsedChanged.InvokeAsync(Collapsed);
+    }
+
+    private RenderFragment TabButton(TabKey key, string label) => builder =>
+    {
+        int seq = 0;
+        builder.OpenElement(seq++, "button");
+        builder.AddAttribute(seq++, "type", "button");
+        builder.AddAttribute(seq++, "class", _active == key ? "tabbtn active" : "tabbtn");
+        builder.AddAttribute(seq++, "onclick", EventCallback.Factory.Create(this, () => _active = key));
+        builder.AddContent(seq++, label);
+        builder.CloseElement();
+    };
+}
