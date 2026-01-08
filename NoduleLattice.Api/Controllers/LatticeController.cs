@@ -54,6 +54,13 @@ public sealed class LatticeController : ControllerBase
         return Ok();
     }
 
+    [HttpPost("thalamus")]
+    public IActionResult Thalamus([FromBody] ThalamusGatesRequest req)
+    {
+        _host.SetThalamusGates(req);
+        return Ok();
+    }
+
     [HttpGet("archive")]
     public ActionResult<ArchiveDto> GetArchive()
         => Ok(_host.SaveArchive());

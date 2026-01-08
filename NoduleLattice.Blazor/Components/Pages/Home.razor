@@ -33,7 +33,35 @@
 
             <div class="spacer"></div>
 
-            <button class="btn" @onclick="SleepReplay">Sleep Replay</button>
+            <button class="btn" @onclick="SleepReplay">Sleep (gated)</button>
+        </div>
+    </section>
+
+    <section class="card">
+        <header class="card-h">
+            <div>
+                <div class="h-title">Thalamus Gates</div>
+                <div class="h-sub">TRN-like gating • routing: Vision→V1, Audio→A1, Body→S1, Internal→Core</div>
+            </div>
+        </header>
+
+        <div class="form">
+            @GateSlider("Vision Gate", nameof(_gVision))
+            @GateSlider("Audio Gate", nameof(_gAudio))
+            @GateSlider("Body Gate", nameof(_gBody))
+            @GateSlider("Internal Gate", nameof(_gInternal))
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="ApplyGates">Apply</button>
+                <button class="btn" @onclick="PresetFocusVision">Focus Vision</button>
+                <button class="btn" @onclick="PresetFocusAudio">Focus Audio</button>
+            </div>
+
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="PresetBodyAwareness">Body</button>
+                <button class="btn" @onclick="PresetIdle">Idle</button>
+                <button class="btn" @onclick="PresetSleep">Sleep</button>
+            </div>
         </div>
     </section>
 
@@ -41,7 +69,7 @@
         <header class="card-h">
             <div>
                 <div class="h-title">Modulators</div>
-                <div class="h-sub">Explicit control only • maps 1:1 to internal values</div>
+                <div class="h-sub">Explicit control only • biases effective gating and dynamics</div>
             </div>
         </header>
 
@@ -63,12 +91,20 @@
     <section class="card">
         <header class="card-h">
             <div>
-                <div class="h-title">Stimulus</div>
-                <div class="h-sub">Explicit sensory drive into an input band</div>
+                <div class="h-title">Stimulus (Routed)</div>
+                <div class="h-sub">Group: 0=Vision, 1=Audio, 2=Body, 3=Internal • passes through thalamus gate</div>
             </div>
         </header>
 
         <div class="form">
+            <label>Group</label>
+            <select class="input" @bind="_stimGroup">
+                <option value="0">Vision</option>
+                <option value="1">Audio</option>
+                <option value="2">Body</option>
+                <option value="3">Internal</option>
+            </select>
+
             <label>Rate (Hz)</label>
             <input class="input" type="number" step="1" @bind="_stimRateHz" />
 
@@ -116,7 +152,7 @@
         <header class="card-h">
             <div>
                 <div class="h-title">Archive</div>
-                <div class="h-sub">Save/Load engine state • reversible operations</div>
+                <div class="h-sub">Save/Load engine state</div>
             </div>
         </header>
 
@@ -143,7 +179,14 @@
     private UiModulators _mods = new();
     private UiInject _inject = new() { NodeId = 1, Exc = 0.25f, Inh = 0f };
 
+    // Thalamus gate controls
+    private float _gVision = 1.0f;
+    private float _gAudio = 1.0f;
+    private float _gBody = 1.0f;
+    private float _gInternal = 0.35f;
+
     // Stimulus controls
+    private int _stimGroup = 0;
     private float _stimRateHz = 8f;
     private float _stimStrength = 0.25f;
     private int _stimSteps = 32;
@@ -155,6 +198,7 @@
 
     protected override async Task OnInitializedAsync()
     {
+        await ApplyGates();
         await Refresh();
     }
 
@@ -196,6 +240,26 @@
         await ApplyModulators();
     }
 
+    private async Task ApplyGates()
+    {
+        var req = new ThalamusGatesRequest
+        {
+            VisionGate = _gVision,
+            AudioGate = _gAudio,
+            BodyGate = _gBody,
+            InternalGate = _gInternal
+        };
+
+        await Api.SetThalamusGates(req);
+        await Refresh();
+    }
+
+    private void PresetFocusVision() { _gVision = 1.0f; _gAudio = 0.15f; _gBody = 0.25f; _gInternal = 0.30f; }
+    private void PresetFocusAudio() { _gVision = 0.15f; _gAudio = 1.0f; _gBody = 0.25f; _gInternal = 0.30f; }
+    private void PresetBodyAwareness() { _gVision = 0.25f; _gAudio = 0.25f; _gBody = 1.0f; _gInternal = 0.30f; }
+    private void PresetIdle() { _gVision = 0.55f; _gAudio = 0.55f; _gBody = 0.55f; _gInternal = 0.35f; }
+    private void PresetSleep() { _gVision = 0.05f; _gAudio = 0.05f; _gBody = 0.05f; _gInternal = 0.60f; }
+
     private async Task Inject()
     {
         await Api.Inject(_inject);
@@ -206,7 +270,7 @@
     {
         var req = new StimulusRequest
         {
-            Group = 0,
+            Group = _stimGroup,
             RateHz = _stimRateHz,
             Strength = _stimStrength,
             Steps = _stimSteps
@@ -236,6 +300,63 @@
     }
 
     private void ClearArchiveText() => _archiveBase64 = string.Empty;
+
+    private RenderFragment GateSlider(string title, string field) => builder =>
+    {
+        int seq = 0;
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "slider");
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "slider-h");
+
+        builder.OpenElement(seq++, "div");
+        builder.AddContent(seq++, title);
+        builder.CloseElement();
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "mono");
+        builder.AddContent(seq++, $"{GetGate(field):0.00}");
+        builder.CloseElement();
+
+        builder.CloseElement();
+
+        builder.OpenElement(seq++, "input");
+        builder.AddAttribute(seq++, "class", "range");
+        builder.AddAttribute(seq++, "type", "range");
+        builder.AddAttribute(seq++, "min", "0");
+        builder.AddAttribute(seq++, "max", "1");
+        builder.AddAttribute(seq++, "step", "0.01");
+        builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetGate(field)));
+        builder.AddAttribute(seq++, "oninput",
+            EventCallback.Factory.CreateBinder<string>(this, v => SetGate(field, v), BindConverter.FormatValue(GetGate(field))));
+        builder.CloseElement();
+
+        builder.CloseElement();
+    };
+
+    private float GetGate(string field) => field switch
+    {
+        nameof(_gVision) => _gVision,
+        nameof(_gAudio) => _gAudio,
+        nameof(_gBody) => _gBody,
+        nameof(_gInternal) => _gInternal,
+        _ => 0f
+    };
+
+    private void SetGate(string field, string raw)
+    {
+        if (!float.TryParse(raw, out var v)) return;
+        v = Math.Clamp(v, 0f, 1f);
+
+        switch (field)
+        {
+            case nameof(_gVision): _gVision = v; break;
+            case nameof(_gAudio): _gAudio = v; break;
+            case nameof(_gBody): _gBody = v; break;
+            case nameof(_gInternal): _gInternal = v; break;
+        }
+    }
 
     private RenderFragment ModSlider(string title, string prop) => builder =>
     {

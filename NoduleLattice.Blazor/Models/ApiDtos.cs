@@ -40,9 +40,14 @@ public sealed class StimulusRequest
     public int Steps { get; init; } = 32;
 }
 
-// IMPORTANT:
-// This DTO must match the API’s JSON contract.
-// If your API uses different property names, adjust here or add JsonPropertyName attributes.
+public sealed class ThalamusGatesRequest
+{
+    public float VisionGate { get; init; } = 1f;
+    public float AudioGate { get; init; } = 1f;
+    public float BodyGate { get; init; } = 1f;
+    public float InternalGate { get; init; } = 0.35f;
+}
+
 public sealed class LatticeSnapshotDto
 {
     public long StepIndex { get; set; }
