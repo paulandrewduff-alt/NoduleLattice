@@ -1,4 +1,5 @@
-﻿@page "/"
+﻿﻿
+@page "/"
 
 @using NoduleLattice.Blazor.Components.Controls
 
@@ -127,6 +128,11 @@
     private int _hipEpisodesCount;
     private string _hipError = string.Empty;
 
+    // UI: episode inspection
+    private long? _hipSelectedId;
+    private int _hipInspectTopN = 12;
+    private bool _hipSortByRecency = false;
+
     private string _archiveBase64 = string.Empty;
 
     private string _apiStatus = string.Empty;
@@ -234,6 +240,13 @@
 
         _hipList = list;
         _hipEpisodesCount = _hipList.Episodes?.Count ?? 0;
+
+        // Keep selection stable if possible
+        if (_hipSelectedId.HasValue)
+        {
+            if (_hipList.Episodes.All(e => e.Id != _hipSelectedId.Value))
+                _hipSelectedId = null;
+        }
     }
 
     private async Task ReplayHippocampus()
@@ -248,6 +261,69 @@
         await Api.ReplayHippocampus(req);
         await Refresh();
         await RefreshHippocampus();
+    }
+
+    private HippocampusEpisodeDto? SelectedEpisode
+        => _hipList?.Episodes?.FirstOrDefault(e => e.Id == _hipSelectedId);
+
+    private IEnumerable<HippocampusEpisodeDto> OrderedEpisodes()
+    {
+        if (_hipList?.Episodes is null) return Array.Empty<HippocampusEpisodeDto>();
+
+        if (_hipSortByRecency)
+        {
+            return _hipList.Episodes
+                .OrderBy(e => (_hipList.CurrentStep - e.CapturedAtStep))
+                .ThenByDescending(e => e.Strength);
+        }
+
+        return _hipList.Episodes
+            .OrderByDescending(e => e.Strength)
+            .ThenByDescending(e => e.CapturedAtStep);
+    }
+
+    private void SelectEpisode(long id)
+        => _hipSelectedId = id;
+
+    private async Task ReplaySelectedEpisode()
+    {
+        if (_hipSelectedId is null) return;
+
+        await Api.ReplayHippocampusEpisode(_hipSelectedId.Value, new HippocampusReplayOneRequest
+        {
+            Gain = _hipReplayGain,
+            Steps = _hipReplaySteps
+        });
+
+        await Refresh();
+        await RefreshHippocampus();
+    }
+
+    private async Task ReplayStrongestEpisode()
+    {
+        if (_hipList is null || _hipList.Episodes.Count == 0) return;
+
+        HippocampusEpisodeDto best;
+
+        if (_hipSortByRecency)
+        {
+            best = _hipList.Episodes
+                .OrderByDescending(e =>
+                {
+                    var age = (float)(_hipList.CurrentStep - e.CapturedAtStep);
+                    if (age < 0) age = 0;
+                    float rec = 1f / (1f + age);
+                    return (e.Strength * 0.70f) + (rec * 0.30f);
+                })
+                .First();
+        }
+        else
+        {
+            best = _hipList.Episodes.OrderByDescending(e => e.Strength).First();
+        }
+
+        _hipSelectedId = best.Id;
+        await ReplaySelectedEpisode();
     }
 
     private async Task ClearHippocampus()
@@ -372,80 +448,167 @@
     </div>;
 
     private RenderFragment HippocampusPanel => @<div>
-    <div class="h-sub" style="margin-bottom:0.6rem;">Episodic capture (decay) + replay into Internal channel • inspectable</div>
+        <style>
+            .mem-grid { display:grid; grid-template-columns: 1fr 1fr; gap:0.75rem; }
+            .mem-list { border:1px solid #2a2a2a; border-radius:12px; overflow:hidden; }
+            .mem-row { display:flex; gap:0.6rem; justify-content:space-between; padding:0.35rem 0.55rem; border-bottom:1px solid #2a2a2a; cursor:pointer; }
+            .mem-row:hover { filter: brightness(1.05); }
+            .mem-row.sel { background:#1e1e1e; box-shadow: 0 0 0 1px rgba(255,255,255,0.05) inset; }
+            .mem-kv { display:grid; grid-template-columns: 1fr 1fr; gap:0.4rem; }
+            .mem-kv .pill { justify-self:start; }
+            .mem-nodes { max-height: 220px; overflow:auto; border:1px solid #2a2a2a; border-radius:12px; padding:0.5rem; }
+            .mem-mini { opacity:0.85; }
+            @@media (max-width: 1100px) { .mem-grid { grid-template-columns: 1fr; } }
+        </style>
 
-@if (!string.IsNullOrWhiteSpace(_hipError))
-    {
-    <div class="inline-warn mono">Hippocampus: @_hipError</div>
-    }
+        <div class="h-sub" style="margin-bottom:0.6rem;">Episodic capture (decay) + replay bursts into Internal channel • select an episode to inspect</div>
 
-    <div class="form">
-        <label>Capture Enabled</label>
-        <input type="checkbox" @bind="_hipCaptureEnabled" />
+        @if (!string.IsNullOrWhiteSpace(_hipError))
+        {
+            <div class="inline-warn mono">Hippocampus: @_hipError</div>
+        }
 
-        <label>Capture Salience Threshold</label>
-        <input class="input" type="number" step="0.01" @bind="_hipSalThr" />
+        <div class="form">
+            <label>Capture Enabled</label>
+            <input type="checkbox" @bind="_hipCaptureEnabled" />
 
-        <label>Capture Alerting Threshold</label>
-        <input class="input" type="number" step="0.01" @bind="_hipAltThr" />
+            <label>Capture Salience Threshold</label>
+            <input class="input" type="number" step="0.01" @bind="_hipSalThr" />
 
-        <label>Top-K</label>
-        <input class="input" type="number" step="1" @bind="_hipTopK" />
+            <label>Capture Alerting Threshold</label>
+            <input class="input" type="number" step="0.01" @bind="_hipAltThr" />
 
-        <label>Max Episodes</label>
-        <input class="input" type="number" step="1" @bind="_hipMax" />
+            <label>Top-K</label>
+            <input class="input" type="number" step="1" @bind="_hipTopK" />
 
-        <label>Decay Per Step</label>
-        <input class="input" type="number" step="0.0001" @bind="_hipDecay" />
+            <label>Max Episodes</label>
+            <input class="input" type="number" step="1" @bind="_hipMax" />
 
-        <label>Min Strength</label>
-        <input class="input" type="number" step="0.01" @bind="_hipMin" />
+            <label>Decay Per Step</label>
+            <input class="input" type="number" step="0.0001" @bind="_hipDecay" />
 
-        <div class="row" style="margin-top:0.5rem;">
-            <button class="btn" @onclick="ApplyHippocampus">Apply</button>
-            <button class="btn" @onclick="RefreshHippocampus">Refresh List</button>
-            <div class="spacer"></div>
-            <button class="btn" @onclick="ClearHippocampus">Clear</button>
-        </div>
+            <label>Min Strength</label>
+            <input class="input" type="number" step="0.01" @bind="_hipMin" />
 
-        <hr />
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" @onclick="ApplyHippocampus">Apply</button>
+                <button class="btn" @onclick="RefreshHippocampus">Refresh List</button>
+                <div class="spacer"></div>
+                <button class="btn" @onclick="ClearHippocampus">Clear</button>
+            </div>
 
-        <label>Replay Count</label>
-        <input class="input" type="number" step="1" @bind="_hipReplayCount" />
+            <hr />
 
-        <label>Replay Gain</label>
-        <input class="input" type="number" step="0.1" @bind="_hipReplayGain" />
+            <label>Replay Count (batch)</label>
+            <input class="input" type="number" step="1" min="1" max="128" @bind="_hipReplayCount" />
 
-        <label>Steps Per Episode</label>
-        <input class="input" type="number" step="1" @bind="_hipReplaySteps" />
+            <label>Replay Gain</label>
+            <input class="input" type="number" step="0.1" @bind="_hipReplayGain" />
 
-        <div class="row" style="margin-top:0.5rem;">
-            <button class="btn" @onclick="ReplayHippocampus">Replay</button>
-            <div class="spacer"></div>
-            <span class="pill">Episodes: @_hipEpisodesCount</span>
-        </div>
+            <label>Steps After Replay</label>
+            <input class="input" type="number" step="1" @bind="_hipReplaySteps" />
 
-        <hr />
+            <div class="row" style="margin-top:0.5rem;">
+                <button class="btn" title="Composite strength+recency" @onclick="ReplayHippocampus">Replay Batch</button>
+                <button class="btn" @onclick="ReplayStrongestEpisode">Replay Strongest</button>
+                <button class="btn" disabled="@(_hipSelectedId is null)" @onclick="ReplaySelectedEpisode">Replay Selected</button>
+                <div class="spacer"></div>
+                <span class="pill">Episodes: @_hipEpisodesCount</span>
+            </div>
 
-        @if (_hipList is not null)
-                {
-        <div class="mono" style="margin-bottom:0.5rem;">CurrentStep: @_hipList.CurrentStep</div>
+            <div class="row" style="margin-top:0.5rem;">
+                <label style="margin:0; display:flex; align-items:center; gap:0.5rem;">
+                    <input type="checkbox" @bind="_hipSortByRecency" />
+                    <span class="muted">Sort by recency</span>
+                </label>
+                <div class="spacer"></div>
+                <label style="margin:0; display:flex; align-items:center; gap:0.5rem;">
+                    <span class="muted">Inspect Top</span>
+                    <input class="input" style="width:90px;" type="number" step="1" min="1" max="64" @bind="_hipInspectTopN" />
+                </label>
+            </div>
 
-        <div style="max-height:260px; overflow:auto;">
-            @foreach (var ep in _hipList.Episodes.OrderByDescending(e => e.Strength).Take(64))
+            <hr />
+
+            @if (_hipList is not null)
+            {
+                <div class="mono" style="margin-bottom:0.5rem;">CurrentStep: @_hipList.CurrentStep</div>
+
+                <div class="mem-grid">
+                    <div>
+                        <div class="mem-list" style="max-height:320px; overflow:auto;">
+                            @foreach (var ep in OrderedEpisodes().Take(96))
+                            {
+                                var age = _hipList.CurrentStep - ep.CapturedAtStep;
+                                var sel = _hipSelectedId == ep.Id;
+                                <div class="mem-row mono @(sel ? "sel" : "")" @onclick="() => SelectEpisode(ep.Id)">
+                                    <span>Ep @ep.Id</span>
+                                    <span class="mem-mini">age @age</span>
+                                    <span class="mem-mini">str @ep.Strength.ToString("0.00")</span>
+                                    <span class="mem-mini">k @ep.NodeIds.Length</span>
+                                </div>
+                            }
+                        </div>
+                    </div>
+
+                    <div>
+                        @if (SelectedEpisode is null)
                         {
-                        var age = _hipList.CurrentStep - ep.CapturedAtStep;
-                <div class="mono" style="padding:0.25rem 0; border-bottom:1px solid #2a2a2a;">
-                    <span>Ep @ep.Id</span>
-                    <span> | age @age</span>
-                    <span> | str @ep.Strength.ToString("0.00")</span>
-                    <span> | k @ep.NodeIds.Length</span>
+                            <div class="card" style="padding:0.75rem;">
+                                <div class="h-title">Inspect</div>
+                                <div class="muted">Select an episode on the left.</div>
+                            </div>
+                        }
+                        else
+                        {
+                            var ep = SelectedEpisode;
+                            var age = _hipList.CurrentStep - ep!.CapturedAtStep;
+                            <div class="card" style="padding:0.75rem;">
+                                <div class="row" style="align-items:center;">
+                                    <div>
+                                        <div class="h-title">Episode @ep.Id</div>
+                                        <div class="h-sub">age @age • strength @ep.Strength.ToString("0.00") • k @ep.NodeIds.Length</div>
+                                    </div>
+                                    <div class="spacer"></div>
+                                    <div class="pill">Captured @ep.CapturedAtStep</div>
+                                </div>
+
+                                <div style="margin-top:0.6rem;" class="mem-kv">
+                                    <div>
+                                        <div class="muted" style="margin-bottom:0.25rem;">Context Modulators</div>
+                                        <div class="mono">
+                                            R @ep.ContextMods.Reward.ToString("0.00") • S @ep.ContextMods.Salience.ToString("0.00") • St @ep.ContextMods.Stability.ToString("0.00")<br />
+                                            A @ep.ContextMods.Alerting.ToString("0.00") • C @ep.ContextMods.Curiosity.ToString("0.00") • G @ep.ContextMods.Goal.ToString("0.00")
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div class="muted" style="margin-bottom:0.25rem;">Context Thalamus</div>
+                                        <div class="mono">
+                                            V @ep.ContextThalamus.VisionGate.ToString("0.00") • Au @ep.ContextThalamus.AudioGate.ToString("0.00") • B @ep.ContextThalamus.BodyGate.ToString("0.00") • In @ep.ContextThalamus.InternalGate.ToString("0.00")
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="muted" style="margin-top:0.75rem; margin-bottom:0.35rem;">Top nodes (by |rate| at capture)</div>
+                                <div class="mem-nodes mono">
+                                    @{
+                                        int n = Math.Min(Math.Min(ep.NodeIds.Length, ep.Values.Length), Math.Clamp(_hipInspectTopN, 1, 64));
+                                        for (int i = 0; i < n; i++)
+                                        {
+                                            <div style="padding:0.15rem 0; border-bottom:1px solid #222;">
+                                                <span style="display:inline-block; width:70px;">node @ep.NodeIds[i]</span>
+                                                <span class="mem-mini">|r| @ep.Values[i].ToString("0.000")</span>
+                                            </div>
+                                        }
+                                    }
+                                </div>
+                            </div>
+                        }
+                    </div>
                 </div>
             }
         </div>
-                }
-    </div>
-</div>;
+    </div>;
 
     private RenderFragment InjectionPanel => @<div>
     <div class="h-sub" style="margin-bottom:0.6rem;">External input only (exc/inh) • explicit action</div>
@@ -478,7 +641,7 @@ private RenderFragment ArchivePanel => @<div>
         </div>
 
         <label>Base64 Archive</label>
-        <textarea class="textarea" rows="10" @bind="_archiveBase64"></textarea>
+        <textarea class="textarea mono archive" rows="14" spellcheck="false" wrap="off" @bind="_archiveBase64"></textarea>
     </div>
 </div>;
 

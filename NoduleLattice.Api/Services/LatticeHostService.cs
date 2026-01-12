@@ -1,61 +1,79 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 using NoduleLattice.Api.Models;
+using NoduleLattice.Abstractions.Math;
+using NoduleLattice.Abstractions.Modulation;
+using NoduleLattice.Core.Determinism;
+using NoduleLattice.Core.Modulation;
+using NoduleLattice.Core.Nodes;
+using NoduleLattice.Core.Runtime;
+using NoduleLattice.Core.Runtime.Memory;
+using NoduleLattice.Core.Synapses;
+using NoduleLattice.Core.Time;
+using NoduleLattice.Core.Topology;
 
 namespace NoduleLattice.Api.Services;
 
+/// <summary>
+/// Canon host facade:
+/// - owns a single in-process NoduleLatticeEngine
+/// - exposes safe API operations for the Blazor simulator
+/// </summary>
 public sealed class LatticeHostService
 {
     private readonly object _gate = new();
     private readonly Random _rng = new(12345);
 
-    private long _step;
-    private readonly List<NodeState> _nodes = new();
-    private readonly List<EdgeState> _edges = new();
+    private readonly NoduleLatticeEngine _engine;
 
     private ModulatorsRequest _mods = new();
-    private ThalamusState _thal = new();
+    private ThalamusGatesRequest _gates = new();
 
     private HippocampusConfigRequest _hipCfg = new();
-    private long _hipNextId = 1;
-    private readonly List<Episode> _episodes = new();
+
+    // Cached regions for stimulus routing (built once after lattice creation)
+    private int[] _visionSources = Array.Empty<int>();
+    private int[] _visionTargets = Array.Empty<int>();
+
+    private int[] _audioSources = Array.Empty<int>();
+    private int[] _audioTargets = Array.Empty<int>();
+
+    private int[] _bodySources = Array.Empty<int>();
+    private int[] _bodyTargets = Array.Empty<int>();
+
+    private int[] _coreTargets = Array.Empty<int>();
 
     public LatticeHostService()
     {
-        const int n = 240;
+        // --- Build canonical engine instance ---
+        var rng = new DeterministicRng(12345);
+        var time = new FixedTimebase(deltaTime: 1.0f, initialStepIndex: 0);
+        var field = new UniformModulatorField();
 
-        for (int i = 0; i < n; i++)
-        {
-            _nodes.Add(new NodeState
-            {
-                Id = i + 1,
-                X = _rng.Next(-10, 11),
-                Y = _rng.Next(-6, 7),
-                Z = _rng.Next(-10, 11),
-                V = (float)(_rng.NextDouble() * 2.0 - 1.0),
-                Rate = 0f,
-                Spiked = false
-            });
-        }
+        var synCfg = new Synapse2Config();
+        var policy = new StructuralPolicy();
+        var topology = new BasicTopologyManager(policy, synCfg, rng);
 
-        long eid = 1;
-        for (int i = 0; i < n * 4; i++)
-        {
-            int pre = _rng.Next(1, n + 1);
-            int post = _rng.Next(1, n + 1);
-            if (pre == post) continue;
+        var membrane = new NoduleLattice.Core.Runtime.MembraneIntegrator();
+        var demand = new NoduleLattice.Core.Runtime.DemandEstimator();
+        var probe = new UtilityProbe(new UtilityProbeConfig());
 
-            _edges.Add(new EdgeState
-            {
-                Id = eid++,
-                Pre = pre,
-                Post = post,
-                Kind = _rng.NextDouble() < 0.75 ? 0 : 1,
-                W = (float)(_rng.NextDouble() * 1.2)
-            });
-        }
+        _engine = new NoduleLatticeEngine(
+            time: time,
+            field: field,
+            topology: topology,
+            membrane: membrane,
+            demand: demand,
+            probe: probe,
+            structuralPeriodSteps: 128,
+            maxDelaySteps: 4,
+            sleep: null);
 
-        _thal = new ThalamusState
+        // Create initial lattice deterministically (mirrors your toy constructor, but using real engine)
+        CreateInitialLattice_NoLock(nodeCount: 240, edgeFactor: 4);
+
+        // Defaults
+        _gates = new ThalamusGatesRequest
         {
             VisionGate = 1.0f,
             AudioGate = 1.0f,
@@ -63,7 +81,13 @@ public sealed class LatticeHostService
             InternalGate = 0.35f
         };
 
+        _mods = new ModulatorsRequest();
+        ApplyModsAndGates_NoLock();
+
         _hipCfg = new HippocampusConfigRequest();
+        ApplyHippocampusConfig_NoLock(_hipCfg);
+
+        CacheRegions_NoLock();
     }
 
     // -----------------------
@@ -74,18 +98,19 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
+            var s = _engine.GetSnapshot();
             return new LatticeSnapshotDto
             {
-                StepIndex = _step,
-                Nodes = _nodes.Select(n => new NodeSnapDto
+                StepIndex = s.StepIndex,
+                Nodes = s.Nodes.Select(n => new NodeSnapDto
                 {
                     Id = n.Id,
-                    Pos = new Pos3Dto { X = n.X, Y = n.Y, Z = n.Z },
+                    Pos = new Pos3Dto { X = n.Pos.X, Y = n.Pos.Y, Z = n.Pos.Z },
                     V = SafeFiniteOr(n.V, 0f),
                     Rate = SafeFiniteOr(n.Rate, 0f),
                     Spiked = n.Spiked
                 }).ToList(),
-                Synapses = _edges.Select(e => new EdgeSnapDto
+                Synapses = s.Synapses.Select(e => new EdgeSnapDto
                 {
                     Id = e.Id,
                     Pre = e.Pre,
@@ -104,20 +129,19 @@ public sealed class LatticeHostService
     public void Step(int steps)
     {
         if (steps <= 0) return;
-        lock (_gate) StepInternal_NoLock(steps);
+        lock (_gate)
+        {
+            ApplyModsAndGates_NoLock();
+            _engine.Step(steps);
+        }
     }
 
     public void Inject(InjectRequest req)
     {
         lock (_gate)
         {
-            var n = _nodes.FirstOrDefault(x => x.Id == req.NodeId);
-            if (n is null) return;
-
-            n.V = SafeFiniteOr(n.V, 0f);
-            n.V += SafeFiniteOr(req.Exc, 0f);
-            n.V -= SafeFiniteOr(req.Inh, 0f);
-            n.V = StabilizeV(n.V);
+            var id = new NoduleLattice.Abstractions.Nodes.NoduleId(req.NodeId);
+            _engine.InjectInput(id, SafeFiniteOr(req.Exc, 0f), SafeFiniteOr(req.Inh, 0f));
         }
     }
 
@@ -125,7 +149,6 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            // sanitize inputs so they can't poison state
             _mods = new ModulatorsRequest
             {
                 Reward = Safe01(req.Reward),
@@ -135,6 +158,8 @@ public sealed class LatticeHostService
                 Curiosity = Safe01(req.Curiosity),
                 Goal = Safe01(req.Goal)
             };
+
+            ApplyModsAndGates_NoLock();
         }
     }
 
@@ -142,10 +167,15 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            _thal.VisionGate = Safe01(req.VisionGate);
-            _thal.AudioGate = Safe01(req.AudioGate);
-            _thal.BodyGate = Safe01(req.BodyGate);
-            _thal.InternalGate = Safe01(req.InternalGate);
+            _gates = new ThalamusGatesRequest
+            {
+                VisionGate = Safe01(req.VisionGate),
+                AudioGate = Safe01(req.AudioGate),
+                BodyGate = Safe01(req.BodyGate),
+                InternalGate = Safe01(req.InternalGate)
+            };
+
+            ApplyModsAndGates_NoLock();
         }
     }
 
@@ -153,13 +183,11 @@ public sealed class LatticeHostService
     {
         if (!run) return;
 
-        ModulatorsRequest savedMods;
-        ThalamusState savedThal;
-
         lock (_gate)
         {
-            savedMods = _mods;
-            savedThal = _thal;
+            // mimic prior behaviour: sleep shifts stability high, alerting low, and gates mostly closed
+            var savedMods = _mods;
+            var savedGates = _gates;
 
             _mods = new ModulatorsRequest
             {
@@ -171,26 +199,29 @@ public sealed class LatticeHostService
                 Goal = savedMods.Goal
             };
 
-            _thal = new ThalamusState
+            _gates = new ThalamusGatesRequest
             {
                 VisionGate = 0.05f,
                 AudioGate = 0.05f,
                 BodyGate = 0.05f,
-                InternalGate = MathF.Max(savedThal.InternalGate, 0.55f)
+                InternalGate = MathF.Max(savedGates.InternalGate, 0.55f)
             };
 
-            // Run internal replays if present.
+            ApplyModsAndGates_NoLock();
+
+            // Optional hippocampus bursts into core before sleep
             ReplayHippocampus_NoLock(new HippocampusReplayRequest { Count = 6, Gain = 1.0f, StepsPerEpisode = 12 });
 
-            StepInternal_NoLock(48);
+            _engine.SleepReplay();
 
             _mods = savedMods;
-            _thal = savedThal;
+            _gates = savedGates;
+            ApplyModsAndGates_NoLock();
         }
     }
 
     // -----------------------
-    // Stimulus via thalamus
+    // Stimulus via gates
     // -----------------------
 
     public void Stimulus(StimulusRequest req)
@@ -199,7 +230,7 @@ public sealed class LatticeHostService
         {
             var sources = SelectSourceBand(req.Group);
             var targets = SelectTargetRegion(req.Group);
-            if (targets.Count == 0) return;
+            if (targets.Length == 0) return;
 
             float dt = 0.02f;
             float rateHz = SafeFiniteOr(req.RateHz, 0f);
@@ -213,25 +244,28 @@ public sealed class LatticeHostService
                 float gEff = EffectiveGate(req.Group);
                 if (gEff > 0.0001f)
                 {
-                    int eventCount = sources.Count > 0 ? sources.Count : 12;
+                    int eventCount = sources.Length > 0 ? sources.Length : 12;
 
                     for (int i = 0; i < eventCount; i++)
                     {
                         if (_rng.NextDouble() >= p) continue;
 
-                        var tgt = targets[_rng.Next(targets.Count)];
+                        int tgtId = targets[_rng.Next(targets.Length)];
 
                         float precision = 0.55f + 0.40f * Safe01(_mods.Stability);
                         float noise = ((float)_rng.NextDouble() * 2f - 1f) * (1f - precision) * 0.08f;
                         noise = SafeFiniteOr(noise, 0f);
 
-                        tgt.V = SafeFiniteOr(tgt.V, 0f);
-                        tgt.V += (baseAmp * gEff) + noise;
-                        tgt.V = StabilizeV(tgt.V);
+                        float amp = (baseAmp * gEff) + noise;
+                        if (amp >= 0)
+                            _engine.InjectInput(new NoduleLattice.Abstractions.Nodes.NoduleId(tgtId), amp, 0f);
+                        else
+                            _engine.InjectInput(new NoduleLattice.Abstractions.Nodes.NoduleId(tgtId), 0f, -amp);
                     }
                 }
 
-                StepInternal_NoLock(1);
+                ApplyModsAndGates_NoLock();
+                _engine.Step(1);
             }
         }
     }
@@ -249,13 +283,13 @@ public sealed class LatticeHostService
                 CaptureEnabled = req.CaptureEnabled,
                 CaptureSalienceThreshold = Safe01(req.CaptureSalienceThreshold),
                 CaptureAlertingThreshold = Safe01(req.CaptureAlertingThreshold),
-                TopK = Math.Clamp(req.TopK, 6, 64),
-                MaxEpisodes = Math.Clamp(req.MaxEpisodes, 8, 2048),
+                TopK = Math.Clamp(req.TopK, 6, 128),
+                MaxEpisodes = Math.Clamp(req.MaxEpisodes, 8, 4096),
                 DecayPerStep = Math.Clamp(SafeFiniteOr(req.DecayPerStep, 0.0015f), 0.0001f, 0.05f),
                 MinStrength = Math.Clamp(SafeFiniteOr(req.MinStrength, 0.06f), 0.001f, 1.0f)
             };
 
-            EnforceEpisodeCapacity_NoLock();
+            ApplyHippocampusConfig_NoLock(_hipCfg);
         }
     }
 
@@ -263,13 +297,12 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            // Extra safety: purge anything non-finite before emitting
-            SanitizeEpisodes_NoLock();
+            var list = _engine.GetHippocampusEpisodes();
 
             return new HippocampusEpisodeListDto
             {
-                CurrentStep = _step,
-                Episodes = _episodes
+                CurrentStep = list.CurrentStep,
+                Episodes = list.Episodes
                     .OrderByDescending(e => e.Strength)
                     .Select(e => new HippocampusEpisodeDto
                     {
@@ -280,8 +313,23 @@ public sealed class LatticeHostService
                         NodeIds = e.NodeIds.ToArray(),
                         Values = e.Values.Select(v => SafeFiniteOr(v, 0f)).ToArray(),
 
-                        ContextMods = e.ContextMods,
-                        ContextThalamus = e.ContextThalamus
+                        ContextMods = new ModulatorsRequest
+                        {
+                            Reward = e.ContextMods.Reward,
+                            Salience = e.ContextMods.Salience,
+                            Stability = e.ContextMods.Stability,
+                            Alerting = e.ContextMods.Alerting,
+                            Curiosity = e.ContextMods.Curiosity,
+                            Goal = e.ContextMods.Goal
+                        },
+
+                        ContextThalamus = new ThalamusGatesRequest
+                        {
+                            VisionGate = e.ContextGates.Vision,
+                            AudioGate = e.ContextGates.Audio,
+                            BodyGate = e.ContextGates.Body,
+                            InternalGate = e.ContextGates.Internal
+                        }
                     })
                     .ToList()
             };
@@ -292,7 +340,7 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            _episodes.Clear();
+            _engine.ClearHippocampus();
         }
     }
 
@@ -304,20 +352,34 @@ public sealed class LatticeHostService
         }
     }
 
+    public void ReplayHippocampusEpisode(long episodeId, HippocampusReplayOneRequest req)
+    {
+        lock (_gate)
+        {
+            float gain = Math.Clamp(SafeFiniteOr(req.Gain, 1f), 0.1f, 5.0f);
+            int steps = Math.Clamp(req.Steps, 1, 64);
+
+            if (!_engine.ReplayHippocampusEpisode(episodeId, gain))
+                return;
+
+            ApplyModsAndGates_NoLock();
+            _engine.Step(steps);
+        }
+    }
+
     private void ReplayHippocampus_NoLock(HippocampusReplayRequest req)
     {
-        if (_episodes.Count == 0) return;
-
-        SanitizeEpisodes_NoLock();
+        var list = _engine.GetHippocampusEpisodes();
+        if (list.Episodes.Count == 0) return;
 
         int count = Math.Clamp(req.Count, 1, 128);
         float gain = Math.Clamp(SafeFiniteOr(req.Gain, 1f), 0.1f, 5.0f);
         int stepsPer = Math.Clamp(req.StepsPerEpisode, 1, 64);
 
-        var chosen = _episodes
+        var chosen = list.Episodes
             .OrderByDescending(e =>
             {
-                var age = (float)(_step - e.CapturedAtStep);
+                float age = (float)(list.CurrentStep - e.CapturedAtStep);
                 if (age < 0) age = 0;
                 float recency = 1.0f / (1.0f + age);
                 return (e.Strength * 0.70f) + (recency * 0.30f);
@@ -325,287 +387,14 @@ public sealed class LatticeHostService
             .Take(count)
             .ToList();
 
-        var coreTargets = SelectTargetRegion(3);
-        if (coreTargets.Count == 0) return;
-
         foreach (var ep in chosen)
         {
-            float epStr = SafeFiniteOr(ep.Strength, 0f);
-            if (epStr <= 0.0001f) continue;
+            if (ep.Strength <= 0.0001f) continue;
 
-            int n = Math.Min(ep.NodeIds.Count, ep.Values.Count);
-
-            for (int i = 0; i < n; i++)
-            {
-                var tgt = coreTargets[_rng.Next(coreTargets.Count)];
-                float v = SafeFiniteOr(ep.Values[i], 0f);
-
-                tgt.V = SafeFiniteOr(tgt.V, 0f);
-                tgt.V += v * epStr * gain;
-                tgt.V = StabilizeV(tgt.V);
-            }
-
-            StepInternal_NoLock(stepsPer);
+            _engine.ReplayHippocampusEpisode(ep.Id, gain);
+            ApplyModsAndGates_NoLock();
+            _engine.Step(stepsPer);
         }
-    }
-
-    // -----------------------
-    // Dynamics
-    // -----------------------
-
-    private void StepInternal_NoLock(int steps)
-    {
-        for (int s = 0; s < steps; s++)
-        {
-            _step++;
-
-            // (A) Hippocampus decay each tick
-            DecayEpisodes_NoLock();
-
-            foreach (var n in _nodes)
-                n.Spiked = false;
-
-            var byId = _nodes.ToDictionary(x => x.Id);
-
-            foreach (var e in _edges)
-            {
-                if (!byId.TryGetValue(e.Pre, out var pre)) continue;
-                if (!byId.TryGetValue(e.Post, out var post)) continue;
-
-                float preV = SafeFiniteOr(pre.V, 0f);
-                float w = SafeFiniteOr(e.W, 0f);
-
-                float current = preV * w * 0.08f;
-                if (e.Kind == 1) current = -current;
-
-                current = SafeFiniteOr(current, 0f);
-
-                post.V = SafeFiniteOr(post.V, 0f);
-                post.V += current;
-                post.V = StabilizeV(post.V);
-            }
-
-            float reward = Safe01(_mods.Reward);
-            float sal = Safe01(_mods.Salience);
-            float stab = Safe01(_mods.Stability);
-            float alert = Safe01(_mods.Alerting);
-            float curiosity = Safe01(_mods.Curiosity);
-            float goal = Safe01(_mods.Goal);
-
-            float gain = 1.0f + 0.35f * alert + 0.25f * sal + 0.15f * curiosity + 0.10f * goal;
-            gain = SafeFiniteOr(gain, 1f);
-
-            float noiseAmp = 0.08f * (1f - 0.70f * stab);
-            noiseAmp = SafeFiniteOr(noiseAmp, 0.05f);
-
-            foreach (var n in _nodes)
-            {
-                float noise = ((float)_rng.NextDouble() * 2f - 1f) * noiseAmp;
-                noise = SafeFiniteOr(noise, 0f);
-
-                n.V = SafeFiniteOr(n.V, 0f);
-
-                // keep values bounded so they can't drift into overflow
-                n.V = (n.V * 0.93f + noise) * gain;
-                n.V = StabilizeV(n.V);
-
-                float thr = 1.0f - (0.12f * reward + 0.08f * sal);
-                thr = SafeFiniteOr(thr, 1f);
-
-                if (n.V > thr)
-                {
-                    n.Spiked = true;
-                    n.V = -0.65f;
-                    n.Rate = Safe01(n.Rate * 0.85f + 0.35f);
-                }
-                else
-                {
-                    float vpos = MathF.Max(n.V, 0f);
-                    n.Rate = Safe01(n.Rate * 0.92f + (vpos * 0.02f));
-                }
-            }
-
-            // (B) Hippocampus capture at end of tick
-            MaybeCaptureEpisode_NoLock();
-        }
-    }
-
-    // -----------------------
-    // Hippocampus internals
-    // -----------------------
-
-    private void MaybeCaptureEpisode_NoLock()
-    {
-        if (!_hipCfg.CaptureEnabled) return;
-
-        float sal = Safe01(_mods.Salience);
-        float alert = Safe01(_mods.Alerting);
-
-        if (sal < _hipCfg.CaptureSalienceThreshold) return;
-        if (alert < _hipCfg.CaptureAlertingThreshold) return;
-
-        int k = Math.Clamp(_hipCfg.TopK, 6, 64);
-
-        var top = _nodes
-            .OrderByDescending(n => SafeFiniteOr(n.V, 0f))
-            .Take(k)
-            .ToList();
-
-        if (top.Count < 6) return;
-
-        var nodeIds = top.Select(n => n.Id).ToList();
-
-        var values = new List<float>(top.Count);
-        foreach (var n in top)
-        {
-            float v = SafeFiniteOr(n.V, 0f);
-            v = Math.Clamp(v, -1.2f, 1.2f);
-            values.Add(v);
-        }
-
-        float strength = Safe01(0.55f * sal + 0.45f * alert);
-
-        var ep = new Episode
-        {
-            Id = _hipNextId++,
-            CapturedAtStep = _step,
-            Strength = strength,
-            NodeIds = nodeIds,
-            Values = values,
-            ContextMods = _mods,
-            ContextThalamus = new ThalamusGatesRequest
-            {
-                VisionGate = Safe01(_thal.VisionGate),
-                AudioGate = Safe01(_thal.AudioGate),
-                BodyGate = Safe01(_thal.BodyGate),
-                InternalGate = Safe01(_thal.InternalGate)
-            }
-        };
-
-        _episodes.Add(ep);
-        EnforceEpisodeCapacity_NoLock();
-    }
-
-    private void DecayEpisodes_NoLock()
-    {
-        if (_episodes.Count == 0) return;
-
-        float decay = Math.Clamp(SafeFiniteOr(_hipCfg.DecayPerStep, 0.0015f), 0.0001f, 0.05f);
-        float min = Math.Clamp(SafeFiniteOr(_hipCfg.MinStrength, 0.06f), 0.001f, 1.0f);
-
-        float mult = 1f - decay;
-
-        for (int i = _episodes.Count - 1; i >= 0; i--)
-        {
-            var e = _episodes[i];
-
-            if (!float.IsFinite(e.Strength))
-            {
-                _episodes.RemoveAt(i);
-                continue;
-            }
-
-            e.Strength *= mult;
-
-            if (!float.IsFinite(e.Strength) || e.Strength < min)
-                _episodes.RemoveAt(i);
-        }
-
-        EnforceEpisodeCapacity_NoLock();
-    }
-
-    private void EnforceEpisodeCapacity_NoLock()
-    {
-        int cap = Math.Clamp(_hipCfg.MaxEpisodes, 8, 2048);
-        if (_episodes.Count <= cap) return;
-
-        _episodes.Sort((a, b) => a.Strength.CompareTo(b.Strength));
-        while (_episodes.Count > cap)
-            _episodes.RemoveAt(0);
-    }
-
-    private void SanitizeEpisodes_NoLock()
-    {
-        for (int i = _episodes.Count - 1; i >= 0; i--)
-        {
-            var e = _episodes[i];
-
-            if (!float.IsFinite(e.Strength))
-            {
-                _episodes.RemoveAt(i);
-                continue;
-            }
-
-            int n = Math.Min(e.NodeIds.Count, e.Values.Count);
-            if (n <= 0)
-            {
-                _episodes.RemoveAt(i);
-                continue;
-            }
-
-            // Trim mismatches (defensive)
-            if (e.NodeIds.Count != n) e.NodeIds = e.NodeIds.Take(n).ToList();
-            if (e.Values.Count != n) e.Values = e.Values.Take(n).ToList();
-
-            for (int j = 0; j < e.Values.Count; j++)
-                e.Values[j] = SafeFiniteOr(e.Values[j], 0f);
-
-            e.Strength = Math.Clamp(SafeFiniteOr(e.Strength, 0f), 0f, 1f);
-        }
-    }
-
-    // -----------------------
-    // Thalamus helpers
-    // -----------------------
-
-    private float EffectiveGate(int group)
-    {
-        float baseGate = group switch
-        {
-            0 => _thal.VisionGate,
-            1 => _thal.AudioGate,
-            2 => _thal.BodyGate,
-            3 => _thal.InternalGate,
-            _ => 1f
-        };
-
-        float alert = Safe01(_mods.Alerting);
-        float stab = Safe01(_mods.Stability);
-
-        float stateFactor = (0.55f + 0.60f * alert) * (0.80f + 0.20f * stab);
-        stateFactor = SafeFiniteOr(stateFactor, 1f);
-
-        float goal = Safe01(_mods.Goal);
-        float sal = Safe01(_mods.Salience);
-
-        float bias = 1.0f + 0.25f * goal + 0.20f * sal;
-        bias = SafeFiniteOr(bias, 1f);
-
-        return Safe01(baseGate * stateFactor * bias);
-    }
-
-    private List<NodeState> SelectSourceBand(int group)
-    {
-        return group switch
-        {
-            0 => _nodes.Where(n => n.X <= -7).ToList(),
-            1 => _nodes.Where(n => n.Z <= -7).ToList(),
-            2 => _nodes.Where(n => n.Y <= -4).ToList(),
-            3 => new List<NodeState>(),
-            _ => _nodes.Where(n => n.X <= -7).ToList()
-        };
-    }
-
-    private List<NodeState> SelectTargetRegion(int group)
-    {
-        return group switch
-        {
-            0 => _nodes.Where(n => n.X >= +6).ToList(),
-            1 => _nodes.Where(n => n.Z >= +6).ToList(),
-            2 => _nodes.Where(n => n.Y >= +3).ToList(),
-            3 => _nodes.Where(n => Math.Abs(n.X) <= 2 && Math.Abs(n.Y) <= 2 && Math.Abs(n.Z) <= 2).ToList(),
-            _ => _nodes.Where(n => Math.Abs(n.X) <= 2 && Math.Abs(n.Y) <= 2 && Math.Abs(n.Z) <= 2).ToList()
-        };
     }
 
     // -----------------------
@@ -616,18 +405,18 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            SanitizeEpisodes_NoLock();
+            var engineBytes = _engine.Save();
+            var engineB64 = Convert.ToBase64String(engineBytes);
+
+            var hipState = _engine.ExportHippocampusState();
 
             var payload = new ArchivePayload
             {
-                Step = _step,
+                EngineBase64 = engineB64,
                 Mods = _mods,
-                Thal = _thal,
+                Gates = _gates,
                 HipCfg = _hipCfg,
-                HipNextId = _hipNextId,
-                Episodes = _episodes,
-                Nodes = _nodes,
-                Edges = _edges
+                HipState = ToDtoHipState(hipState)
             };
 
             var json = JsonSerializer.Serialize(payload);
@@ -646,25 +435,285 @@ public sealed class LatticeHostService
             var payload = JsonSerializer.Deserialize<ArchivePayload>(json);
             if (payload is null) return;
 
-            _step = payload.Step;
+            if (!string.IsNullOrWhiteSpace(payload.EngineBase64))
+            {
+                var bytes = Convert.FromBase64String(payload.EngineBase64);
+                _engine.Load(bytes);
+            }
+
             _mods = payload.Mods ?? new ModulatorsRequest();
-            _thal = payload.Thal ?? new ThalamusState();
-
+            _gates = payload.Gates ?? new ThalamusGatesRequest();
             _hipCfg = payload.HipCfg ?? new HippocampusConfigRequest();
-            _hipNextId = payload.HipNextId <= 0 ? 1 : payload.HipNextId;
 
-            _episodes.Clear();
-            _episodes.AddRange(payload.Episodes ?? new List<Episode>());
+            ApplyModsAndGates_NoLock();
+            ApplyHippocampusConfig_NoLock(_hipCfg);
 
-            _nodes.Clear();
-            _nodes.AddRange(payload.Nodes ?? new List<NodeState>());
+            if (payload.HipState is not null)
+            {
+                _engine.ImportHippocampusState(FromDtoHipState(payload.HipState));
+            }
 
-            _edges.Clear();
-            _edges.AddRange(payload.Edges ?? new List<EdgeState>());
-
-            SanitizeEpisodes_NoLock();
-            EnforceEpisodeCapacity_NoLock();
+            CacheRegions_NoLock();
         }
+    }
+
+    // -----------------------
+    // Internal helpers
+    // -----------------------
+
+    private void ApplyModsAndGates_NoLock()
+    {
+        _engine.SetModulators(new ModulatorVector
+        {
+            Reward = Safe01(_mods.Reward),
+            Salience = Safe01(_mods.Salience),
+            Stability = Safe01(_mods.Stability),
+            Alerting = Safe01(_mods.Alerting),
+            Curiosity = Safe01(_mods.Curiosity),
+            Goal = Safe01(_mods.Goal)
+        });
+
+        _engine.SetInputGates(new InputGates(
+            Vision: Safe01(_gates.VisionGate),
+            Audio: Safe01(_gates.AudioGate),
+            Body: Safe01(_gates.BodyGate),
+            Internal: Safe01(_gates.InternalGate)
+        ));
+    }
+
+    private void ApplyHippocampusConfig_NoLock(HippocampusConfigRequest cfg)
+    {
+        _engine.SetHippocampusConfig(new HippocampusConfig
+        {
+            CaptureEnabled = cfg.CaptureEnabled,
+            CaptureSalienceThreshold = Safe01(cfg.CaptureSalienceThreshold),
+            CaptureAlertingThreshold = Safe01(cfg.CaptureAlertingThreshold),
+            TopK = Math.Clamp(cfg.TopK, 6, 128),
+            MaxEpisodes = Math.Clamp(cfg.MaxEpisodes, 8, 4096),
+            DecayPerStep = Math.Clamp(SafeFiniteOr(cfg.DecayPerStep, 0.0015f), 0.0001f, 0.05f),
+            MinStrength = Math.Clamp(SafeFiniteOr(cfg.MinStrength, 0.06f), 0.001f, 1.0f)
+        });
+    }
+
+    private float EffectiveGate(int group)
+    {
+        float baseGate = group switch
+        {
+            0 => _gates.VisionGate,
+            1 => _gates.AudioGate,
+            2 => _gates.BodyGate,
+            3 => _gates.InternalGate,
+            _ => 1f
+        };
+
+        float alert = Safe01(_mods.Alerting);
+        float stab = Safe01(_mods.Stability);
+
+        float stateFactor = (0.55f + 0.60f * alert) * (0.80f + 0.20f * stab);
+        stateFactor = SafeFiniteOr(stateFactor, 1f);
+
+        float goal = Safe01(_mods.Goal);
+        float sal = Safe01(_mods.Salience);
+
+        float bias = 1.0f + 0.25f * goal + 0.20f * sal;
+        bias = SafeFiniteOr(bias, 1f);
+
+        return Safe01(baseGate * stateFactor * bias);
+    }
+
+    private int[] SelectSourceBand(int group)
+        => group switch
+        {
+            0 => _visionSources,
+            1 => _audioSources,
+            2 => _bodySources,
+            3 => Array.Empty<int>(),
+            _ => _visionSources
+        };
+
+    private int[] SelectTargetRegion(int group)
+        => group switch
+        {
+            0 => _visionTargets,
+            1 => _audioTargets,
+            2 => _bodyTargets,
+            3 => _coreTargets,
+            _ => _coreTargets
+        };
+
+    private void CacheRegions_NoLock()
+    {
+        var snap = _engine.GetSnapshot();
+
+        _visionSources = snap.Nodes.Where(n => n.Pos.X <= -7).Select(n => n.Id).ToArray();
+        _visionTargets = snap.Nodes.Where(n => n.Pos.X >= +6).Select(n => n.Id).ToArray();
+
+        _audioSources = snap.Nodes.Where(n => n.Pos.Z <= -7).Select(n => n.Id).ToArray();
+        _audioTargets = snap.Nodes.Where(n => n.Pos.Z >= +6).Select(n => n.Id).ToArray();
+
+        _bodySources = snap.Nodes.Where(n => n.Pos.Y <= -4).Select(n => n.Id).ToArray();
+        _bodyTargets = snap.Nodes.Where(n => n.Pos.Y >= +3).Select(n => n.Id).ToArray();
+
+        _coreTargets = snap.Nodes.Where(n => Math.Abs(n.Pos.X) <= 2 && Math.Abs(n.Pos.Y) <= 2 && Math.Abs(n.Pos.Z) <= 2).Select(n => n.Id).ToArray();
+    }
+
+    private void CreateInitialLattice_NoLock(int nodeCount, int edgeFactor)
+    {
+        for (int i = 0; i < nodeCount; i++)
+        {
+            var id = new NoduleLattice.Abstractions.Nodes.NoduleId(i + 1);
+            var pos = new Int3(
+                _rng.Next(-10, 11),
+                _rng.Next(-6, 7),
+                _rng.Next(-10, 11));
+
+            var node = new Nodule(id, pos);
+
+            var m = node.Membrane;
+            m.Potential = (float)(_rng.NextDouble() * 2.0 - 1.0);
+            node.Membrane = m;
+
+            _engine.AddNode(node);
+        }
+
+        long eid = 1;
+        var synCfg = new Synapse2Config();
+
+        for (int i = 0; i < nodeCount * edgeFactor; i++)
+        {
+            int pre = _rng.Next(1, nodeCount + 1);
+            int post = _rng.Next(1, nodeCount + 1);
+            if (pre == post) continue;
+
+            var sid = new NoduleLattice.Abstractions.Synapses.SynapseId(eid++);
+            var syn = new Synapse2(
+                id: sid,
+                pre: new NoduleLattice.Abstractions.Nodes.NoduleId(pre),
+                post: new NoduleLattice.Abstractions.Nodes.NoduleId(post),
+                kind: _rng.NextDouble() < 0.75 ? NoduleLattice.Abstractions.Synapses.SynapseKind.Excitatory : NoduleLattice.Abstractions.Synapses.SynapseKind.Inhibitory,
+                cfg: synCfg,
+                initialWeight: (float)(_rng.NextDouble() * 1.2),
+                initialGain: 1.0f,
+                delaySteps: 0);
+
+            _engine.AddSynapse(syn);
+        }
+    }
+
+    // -----------------------
+    // Archive payload model
+    // -----------------------
+
+    private sealed class ArchivePayload
+    {
+        public string EngineBase64 { get; set; } = string.Empty;
+        public ModulatorsRequest? Mods { get; set; }
+        public ThalamusGatesRequest? Gates { get; set; }
+
+        public HippocampusConfigRequest? HipCfg { get; set; }
+        public HipStateDto? HipState { get; set; }
+    }
+
+    private sealed class HipStateDto
+    {
+        public HippocampusConfigRequest? Config { get; set; }
+        public long NextId { get; set; }
+        public List<HipEpisodeDto> Episodes { get; set; } = new();
+    }
+
+    private sealed class HipEpisodeDto
+    {
+        public long Id { get; set; }
+        public long CapturedAtStep { get; set; }
+        public float Strength { get; set; }
+
+        public int[] NodeIds { get; set; } = Array.Empty<int>();
+        public float[] Values { get; set; } = Array.Empty<float>();
+
+        public ModulatorsRequest ContextMods { get; set; } = new();
+        public ThalamusGatesRequest ContextThalamus { get; set; } = new();
+    }
+
+    private static HipStateDto ToDtoHipState(HippocampusState s)
+        => new()
+        {
+            Config = new HippocampusConfigRequest
+            {
+                CaptureEnabled = s.Config.CaptureEnabled,
+                CaptureSalienceThreshold = s.Config.CaptureSalienceThreshold,
+                CaptureAlertingThreshold = s.Config.CaptureAlertingThreshold,
+                TopK = s.Config.TopK,
+                MaxEpisodes = s.Config.MaxEpisodes,
+                DecayPerStep = s.Config.DecayPerStep,
+                MinStrength = s.Config.MinStrength
+            },
+            NextId = s.NextId,
+            Episodes = s.Episodes.Select(e => new HipEpisodeDto
+            {
+                Id = e.Id,
+                CapturedAtStep = e.CapturedAtStep,
+                Strength = e.Strength,
+                NodeIds = e.NodeIds.ToArray(),
+                Values = e.Values.ToArray(),
+                ContextMods = new ModulatorsRequest
+                {
+                    Reward = e.ContextMods.Reward,
+                    Salience = e.ContextMods.Salience,
+                    Stability = e.ContextMods.Stability,
+                    Alerting = e.ContextMods.Alerting,
+                    Curiosity = e.ContextMods.Curiosity,
+                    Goal = e.ContextMods.Goal
+                },
+                ContextThalamus = new ThalamusGatesRequest
+                {
+                    VisionGate = e.ContextGates.Vision,
+                    AudioGate = e.ContextGates.Audio,
+                    BodyGate = e.ContextGates.Body,
+                    InternalGate = e.ContextGates.Internal
+                }
+            }).ToList()
+        };
+
+    private static HippocampusState FromDtoHipState(HipStateDto d)
+    {
+        var cfg = d.Config ?? new HippocampusConfigRequest();
+
+        return new HippocampusState
+        {
+            Config = new HippocampusConfig
+            {
+                CaptureEnabled = cfg.CaptureEnabled,
+                CaptureSalienceThreshold = Math.Clamp(cfg.CaptureSalienceThreshold, 0f, 1f),
+                CaptureAlertingThreshold = Math.Clamp(cfg.CaptureAlertingThreshold, 0f, 1f),
+                TopK = Math.Clamp(cfg.TopK, 6, 128),
+                MaxEpisodes = Math.Clamp(cfg.MaxEpisodes, 8, 4096),
+                DecayPerStep = Math.Clamp(cfg.DecayPerStep, 0.0001f, 0.05f),
+                MinStrength = Math.Clamp(cfg.MinStrength, 0.001f, 1.0f)
+            },
+            NextId = d.NextId <= 0 ? 1 : d.NextId,
+            Episodes = d.Episodes.Select(e => new HippocampusEpisode
+            {
+                Id = e.Id,
+                CapturedAtStep = e.CapturedAtStep,
+                Strength = Math.Clamp(float.IsFinite(e.Strength) ? e.Strength : 0f, 0f, 1f),
+                NodeIds = e.NodeIds ?? Array.Empty<int>(),
+                Values = (e.Values ?? Array.Empty<float>()).Select(v => float.IsFinite(v) ? v : 0f).ToArray(),
+                ContextMods = new ModulatorVector
+                {
+                    Reward = e.ContextMods.Reward,
+                    Salience = e.ContextMods.Salience,
+                    Stability = e.ContextMods.Stability,
+                    Alerting = e.ContextMods.Alerting,
+                    Curiosity = e.ContextMods.Curiosity,
+                    Goal = e.ContextMods.Goal
+                },
+                ContextGates = new InputGates(
+                    Vision: e.ContextThalamus.VisionGate,
+                    Audio: e.ContextThalamus.AudioGate,
+                    Body: e.ContextThalamus.BodyGate,
+                    Internal: e.ContextThalamus.InternalGate)
+            }).ToList()
+        };
     }
 
     // -----------------------
@@ -681,72 +730,4 @@ public sealed class LatticeHostService
 
     private static float SafeFiniteOr(float v, float fallback)
         => float.IsFinite(v) ? v : fallback;
-
-    private static float StabilizeV(float v)
-    {
-        if (!float.IsFinite(v)) return 0f;
-        // Hard clamp prevents runaway and protects episode capture/serialization.
-        if (v > 6f) return 6f;
-        if (v < -6f) return -6f;
-        return v;
-    }
-
-    // -----------------------
-    // Payload + internal models
-    // -----------------------
-
-    private sealed class ArchivePayload
-    {
-        public long Step { get; set; }
-        public ModulatorsRequest? Mods { get; set; }
-        public ThalamusState? Thal { get; set; }
-
-        public HippocampusConfigRequest? HipCfg { get; set; }
-        public long HipNextId { get; set; }
-        public List<Episode>? Episodes { get; set; }
-
-        public List<NodeState>? Nodes { get; set; }
-        public List<EdgeState>? Edges { get; set; }
-    }
-
-    private sealed class ThalamusState
-    {
-        public float VisionGate { get; set; } = 1f;
-        public float AudioGate { get; set; } = 1f;
-        public float BodyGate { get; set; } = 1f;
-        public float InternalGate { get; set; } = 0.35f;
-    }
-
-    private sealed class Episode
-    {
-        public long Id { get; set; }
-        public long CapturedAtStep { get; set; }
-        public float Strength { get; set; }
-
-        public List<int> NodeIds { get; set; } = new();
-        public List<float> Values { get; set; } = new();
-
-        public ModulatorsRequest ContextMods { get; set; } = new();
-        public ThalamusGatesRequest ContextThalamus { get; set; } = new();
-    }
-
-    private sealed class NodeState
-    {
-        public int Id { get; set; }
-        public int X { get; set; }
-        public int Y { get; set; }
-        public int Z { get; set; }
-        public float V { get; set; }
-        public float Rate { get; set; }
-        public bool Spiked { get; set; }
-    }
-
-    private sealed class EdgeState
-    {
-        public long Id { get; set; }
-        public int Pre { get; set; }
-        public int Post { get; set; }
-        public float W { get; set; }
-        public int Kind { get; set; }
-    }
 }
