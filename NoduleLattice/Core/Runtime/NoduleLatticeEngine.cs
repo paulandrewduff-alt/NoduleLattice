@@ -6,6 +6,7 @@ using NoduleLattice.Abstractions.Synapses;
 using NoduleLattice.Abstractions.Time;
 using NoduleLattice.Core.Modulation;
 using NoduleLattice.Core.Runtime.Sleep;
+using NoduleLattice.Core.Runtime.Memory;
 using NoduleLattice.Core.Runtime.Snapshots;
 using NoduleLattice.Core.Spatial;
 using NoduleLattice.Core.Synapses;
@@ -44,6 +45,12 @@ public sealed class NoduleLatticeEngine : IArchiveStore
     private readonly SleepReplayConfig _sleep;
     private readonly ReplayBuffer _replay;
 
+    private readonly Dictionary<NoduleId, ModulatorVector> _perNodeMod = new();
+
+    // Entry 011+: hippocampus lives in core
+    private readonly HippocampusMemory _hippocampus = new();
+    private InputGates _gates = InputGates.Default;
+
     public NoduleLatticeEngine(
         IResettableTimebase time,
         UniformModulatorField field,
@@ -73,6 +80,40 @@ public sealed class NoduleLatticeEngine : IArchiveStore
     public long StepIndex => _time.StepIndex;
 
     public void SetModulators(ModulatorVector v) => _field.Set(v);
+
+    public void SetInputGates(InputGates gates)
+    {
+        _gates = gates.Clamp01();
+        _hippocampus.SetInputGates(_gates);
+    }
+
+    public void SetHippocampusConfig(HippocampusConfig cfg) => _hippocampus.SetConfig(cfg);
+
+    public HippocampusEpisodeList GetHippocampusEpisodes() => _hippocampus.Snapshot(_time.StepIndex);
+
+    public HippocampusState ExportHippocampusState() => _hippocampus.ExportState();
+
+    public void ImportHippocampusState(HippocampusState state) => _hippocampus.ImportState(state);
+
+    public bool ReplayHippocampusEpisode(long episodeId, float gain = 1.0f)
+    {
+        var ep = _hippocampus.GetEpisode(episodeId);
+        if (ep is null) return false;
+
+        float g = MathF.Max(0f, gain) * Math.Clamp(ep.Strength, 0f, 1f);
+        int n = Math.Min(ep.NodeIds.Length, ep.Values.Length);
+        for (int i = 0; i < n; i++)
+        {
+            var id = new NoduleId(ep.NodeIds[i]);
+            float v2 = ep.Values[i] * g;
+            if (v2 >= 0f) InjectInput(id, v2, 0f);
+            else InjectInput(id, 0f, -v2);
+        }
+
+        return true;
+    }
+
+    public void ClearHippocampus() => _hippocampus.Clear();
 
     public void AddNode(INodule node)
     {
@@ -181,9 +222,9 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         }
 
         // Sample modulators
-        var perNodeMod = new Dictionary<NoduleId, ModulatorVector>(_nodes.Count);
+        _perNodeMod.Clear();
         foreach (var n in _nodes.Values)
-            perNodeMod[n.Id] = _field.Sample(n.Position);
+            _perNodeMod[n.Id] = _field.Sample(n.Position);
 
         _probationOutputs.Clear();
 
@@ -191,7 +232,7 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         foreach (var syn in _synapses.Values)
         {
             var preAct = GetDelayedActivity(syn.Pre, syn.DelaySteps);
-            var m = perNodeMod[syn.Post];
+            var m = _perNodeMod[syn.Post];
 
             float outSig = syn.ComputeOutput(preAct, m);
 
@@ -233,14 +274,14 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         // Phase 6
         foreach (var syn in _synapses.Values)
         {
-            var m = perNodeMod[syn.Post];
+            var m = _perNodeMod[syn.Post];
             syn.Consolidate(m);
         }
 
         // Phase 7
         foreach (var syn in _synapses.Values)
         {
-            var m = perNodeMod[syn.Post];
+            var m = _perNodeMod[syn.Post];
             var demand = _demand.Estimate(m);
             syn.SlowHooks(m, demand);
 
@@ -253,7 +294,9 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         var all = _synapses.Values.ToList();
         var view = new TopologyView(_time.StepIndex, _nodes, _incoming, _outgoing, all, _spatial);
 
-        _probe.ObserveStep(view, _topology, id => perNodeMod[id], _probationOutputs);
+        _probe.ObserveStep(view, _topology, id => _perNodeMod[id], _probationOutputs);
+
+        _hippocampus.TickAndMaybeCapture(_time.StepIndex, _field.Current, _nodes.Values);
 
         _time.Advance();
 

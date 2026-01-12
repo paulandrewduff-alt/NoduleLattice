@@ -87,6 +87,18 @@ public sealed class HippocampusReplayRequest
     public int StepsPerEpisode { get; init; } = 10;
 }
 
+/// <summary>
+/// Replay a single episode by id.
+/// </summary>
+public sealed class HippocampusReplayOneRequest
+{
+    /// <summary>Injected strength multiplier (applied to stored values).</summary>
+    public float Gain { get; init; } = 1.0f;
+
+    /// <summary>Steps to spread the burst across.</summary>
+    public int Steps { get; init; } = 12;
+}
+
 public sealed class HippocampusEpisodeListDto
 {
     public long CurrentStep { get; set; }

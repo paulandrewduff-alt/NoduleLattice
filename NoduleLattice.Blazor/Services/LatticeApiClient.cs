@@ -122,6 +122,9 @@ public sealed class LatticeApiClient
     public async Task ReplayHippocampus(HippocampusReplayRequest req)
         => await _http.PostAsJsonAsync("api/lattice/hippocampus/replay", req);
 
+    public async Task ReplayHippocampusEpisode(long episodeId, HippocampusReplayOneRequest req)
+        => await _http.PostAsJsonAsync($"api/lattice/hippocampus/replay/{episodeId}", req);
+
     public async Task ClearHippocampus()
         => await _http.PostAsync("api/lattice/hippocampus/clear", content: null);
 

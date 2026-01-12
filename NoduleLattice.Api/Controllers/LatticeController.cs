@@ -83,6 +83,13 @@ public sealed class LatticeController : ControllerBase
         return Ok();
     }
 
+    [HttpPost("hippocampus/replay/{episodeId:long}")]
+    public IActionResult HippocampusReplayOne([FromRoute] long episodeId, [FromBody] HippocampusReplayOneRequest req)
+    {
+        _host.ReplayHippocampusEpisode(episodeId, req);
+        return Ok();
+    }
+
     [HttpPost("hippocampus/clear")]
     public IActionResult HippocampusClear()
     {

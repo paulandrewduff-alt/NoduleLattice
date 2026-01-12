@@ -66,6 +66,12 @@ public sealed class HippocampusReplayRequest
     public int StepsPerEpisode { get; init; } = 10;
 }
 
+public sealed class HippocampusReplayOneRequest
+{
+    public float Gain { get; init; } = 1.0f;
+    public int Steps { get; init; } = 12;
+}
+
 public sealed class HippocampusEpisodeListDto
 {
     public long CurrentStep { get; set; }

@@ -179,6 +179,38 @@ label {
     outline: none;
 }
 
+/* --- Compact control dock inputs ---
+   The right-side dock is narrow; full-width numeric inputs can look oversized.
+   We keep textareas full-width, but make number/select inputs visually tighter.
+*/
+
+.dock .input[type="number"],
+.dock select.input {
+    max-width: 190px;
+}
+
+.input.xs {
+    max-width: 120px;
+}
+
+.input.sm {
+    max-width: 160px;
+}
+
+.input.md {
+    max-width: 220px;
+}
+
+.textarea.mono,
+.input.mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.textarea.archive {
+    min-height: 320px;
+    resize: vertical;
+}
+
 .textarea {
     resize: vertical;
 }
