@@ -1,25 +1,28 @@
+// ============================================================================
+// FILE: NoduleLattice.Api/Program.cs
+// PURPOSE:
+//   Register runner as hosted service + standard DI.
+// ============================================================================
+using Microsoft.AspNetCore.Builder;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using NoduleLattice.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Controllers
 builder.Services.AddControllers();
 
-// Swagger
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// Lattice host (snapshot-only service facade)
+// Canon host
 builder.Services.AddSingleton<LatticeHostService>();
 
-var app = builder.Build();
+// Real-time runner (hosted background service)
+builder.Services.AddSingleton<LatticeRunnerService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<LatticeRunnerService>());
 
-app.MapGet("/health", () => Results.Ok(new
-{
-    ok = true,
-    env = app.Environment.EnvironmentName,
-    timeUtc = DateTime.UtcNow
-}));
+var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
 {
@@ -28,6 +31,11 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
+app.UseAuthorization();
+
+app.MapGet("/", () => Results.Ok(new { name = "NoduleLattice.Api", ok = true }));
+app.MapGet("/health", () => Results.Ok(new { ok = true }));
+
 app.MapControllers();
 
 app.Run();

@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
+using NoduleLattice.Blazor.Models;
 
 namespace NoduleLattice.Blazor.Components.Network;
 
@@ -15,7 +16,6 @@ public partial class Network3D : ComponentBase, IAsyncDisposable
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
-        // Never attempt JS if we've already failed init.
         if (_initError is not null) return;
 
         if (firstRender)
@@ -27,7 +27,6 @@ public partial class Network3D : ComponentBase, IAsyncDisposable
             }
             catch (JSException ex)
             {
-                // This is your [object Event] case. Capture and stop future attempts.
                 _initError = $"JS init failed: {ex.Message}";
                 Console.Error.WriteLine($"[Network3D] {_initError}");
                 return;
@@ -42,18 +41,25 @@ public partial class Network3D : ComponentBase, IAsyncDisposable
 
         if (_module is null || _instance is null) return;
         if (Snapshot is null) return;
-        if (Snapshot.StepIndex == _lastStep) return;
 
-        _lastStep = Snapshot.StepIndex;
+        // If only view changed, we still want to repaint.
+        var step = Snapshot.StepIndex;
+        var view = View ?? new NetworkViewOptions();
+
+        if (step == _lastStep && firstRender == false)
+        {
+            // allow view-only changes to flow through:
+            // we don't have a cheap "view hash", so always update if View is non-null.
+            if (View is null) return;
+        }
+
+        _lastStep = step;
 
         try
         {
-            await _module.InvokeVoidAsync("updateNetwork3D", _instance, Snapshot);
+            await _module.InvokeVoidAsync("updateNetwork3D", _instance, Snapshot, view);
         }
-        catch (JSDisconnectedException)
-        {
-            // circuit gone; ignore
-        }
+        catch (JSDisconnectedException) { }
         catch (JSException ex)
         {
             Console.Error.WriteLine($"[Network3D] JS update failed: {ex.Message}");
@@ -71,22 +77,9 @@ public partial class Network3D : ComponentBase, IAsyncDisposable
             if (_module is not null && _instance is not null)
                 await _module.InvokeVoidAsync("disposeNetwork3D", _instance);
         }
-        catch (JSDisconnectedException) { }
-        catch (ObjectDisposedException) { }
         catch { }
 
-        try
-        {
-            if (_instance is not null)
-                await _instance.DisposeAsync();
-        }
-        catch { }
-
-        try
-        {
-            if (_module is not null)
-                await _module.DisposeAsync();
-        }
-        catch { }
+        try { if (_instance is not null) await _instance.DisposeAsync(); } catch { }
+        try { if (_module is not null) await _module.DisposeAsync(); } catch { }
     }
 }

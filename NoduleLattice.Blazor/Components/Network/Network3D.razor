@@ -1,9 +1,11 @@
 ﻿@using Microsoft.JSInterop
+@using NoduleLattice.Blazor.Models
 
 <div class="net3d" style="height:@(HeightPx)px;" @ref="_host"></div>
 
 @code {
     [Parameter] public LatticeSnapshotDto? Snapshot { get; set; }
+    [Parameter] public NetworkViewOptions? View { get; set; }
     [Parameter] public int HeightPx { get; set; } = 520;
 
     private ElementReference _host;

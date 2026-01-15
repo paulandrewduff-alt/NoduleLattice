@@ -1,224 +1,228 @@
 ﻿@page "/"
+@implements IAsyncDisposable
+@using NoduleLattice.Blazor.Models
+@using NoduleLattice.Blazor.Services
+@using NoduleLattice.Blazor.Components.Network
+@inject LatticeApiClient Api
 
-<h1>Sanity View</h1>
+<div class="page">
+    <header class="topbar">
+        <div class="title">
+            <div class="h1">NoduleLattice</div>
+            <div class="sub">Real-time runner • snapshot polling • cortex-look renderer</div>
+        </div>
 
-@if (!string.IsNullOrWhiteSpace(_apiStatus))
-{
-    <div class="card" style="margin-bottom:1rem;">
-        <div class="mono">@_apiStatus</div>
-        @if (!string.IsNullOrWhiteSpace(_apiError))
-        {
-            <div class="muted" style="margin-top:0.35rem;">@_apiError</div>
-        }
-    </div>
-}
+        <div class="status">
+            <div class="pill">step @_stepIndex</div>
+            <div class="pill">@(_runStatus?.Running == true ? "RUNNING" : "STOPPED")</div>
+        </div>
+    </header>
 
-<div class="grid">
+    @if (!string.IsNullOrWhiteSpace(_apiStatus) || !string.IsNullOrWhiteSpace(_apiError))
+    {
+        <section class="card">
+            <header class="card-h">
+                <div>
+                    <div class="h-title">API</div>
+                    <div class="h-sub">@_apiStatus</div>
+                </div>
+                @if (!string.IsNullOrWhiteSpace(_apiError))
+                {
+                    <div class="err">@_apiError</div>
+                }
+            </header>
+        </section>
+    }
+
+    <section class="grid">
+        <section class="card">
+            <header class="card-h">
+                <div>
+                    <div class="h-title">Run (Real-Time)</div>
+                    <div class="h-sub">Background stepping loop hosted by the API</div>
+                </div>
+                <div class="pill mono">@(_runStatus?.Running == true ? "RUNNING" : "STOPPED")</div>
+            </header>
+
+            <div class="form">
+                <label class="lbl">Target Hz</label>
+                <input class="input" type="number" min="1" max="240" @bind="_runHz" />
+
+                <label class="lbl">Steps / Tick</label>
+                <input class="input" type="number" min="1" max="4096" @bind="_runStepsPerTick" />
+
+                <label class="lbl">Poll ms (UI)</label>
+                <input class="input" type="number" min="16" max="2000" @bind="_pollMs" />
+
+                <label class="lbl">Auto-poll</label>
+                <div class="row">
+                    <input type="checkbox" @bind="_autoPoll" />
+                    <span class="muted">Update snapshot on timer</span>
+                </div>
+            </div>
+
+            <div class="row actions">
+                <button class="btn" @onclick="StartRunner">Start</button>
+                <button class="btn" @onclick="StopRunner">Stop</button>
+                <button class="btn" @onclick="Refresh">Refresh Now</button>
+            </div>
+
+            @if (_runStatus is not null)
+            {
+                <div class="mono small" style="margin-top:0.75rem;">
+                    ticks=@_runStatus.Ticks • hz=@_runStatus.TargetHz • steps/tick=@_runStatus.StepsPerTick
+                    @if (!string.IsNullOrWhiteSpace(_runStatus.LastError))
+                    {
+                        <div class="err small">runner error: @_runStatus.LastError</div>
+                    }
+                </div>
+            }
+        </section>
+
+        <section class="card">
+            <header class="card-h">
+                <div>
+                    <div class="h-title">Manual</div>
+                    <div class="h-sub">One-shot stepping (always works, even if runner is stopped)</div>
+                </div>
+                <div class="pill mono">step @_stepIndex</div>
+            </header>
+
+            <div class="row actions" style="flex-wrap:wrap;">
+                <button class="btn" @onclick="() => Step(1)">Step 1</button>
+                <button class="btn" @onclick="() => Step(8)">Step 8</button>
+                <button class="btn" @onclick="() => Step(16)">Step 16</button>
+                <button class="btn" @onclick="() => Step(64)">Step 64</button>
+                <button class="btn" @onclick="() => Step(128)">Step 128</button>
+            </div>
+
+            <div class="row" style="margin-top:0.75rem;">
+                <button class="btn" @onclick="SleepReplay">Sleep (gated)</button>
+                <div class="spacer"></div>
+                <div class="mono small">@Api.LastResolvedSnapshotPath</div>
+            </div>
+
+            @if (!string.IsNullOrWhiteSpace(Api.LastError))
+            {
+                <div class="err small" style="margin-top:0.5rem;">@Api.LastError</div>
+            }
+        </section>
+    </section>
+
     <section class="card">
         <header class="card-h">
             <div>
                 <div class="h-title">3D Network</div>
-                <div class="h-sub">Snapshot-only rendering • Orbit mouse controls</div>
+                <div class="h-sub">Cortex slab • lamina planes • edge thinning • hover column highlight</div>
             </div>
-            <div class="pill">Step: @_stepIndex</div>
+            <div class="pill mono">step @_stepIndex</div>
         </header>
 
-        <Network3D Snapshot="_snapshot" HeightPx="520" />
+        <Network3D Snapshot="_snapshot" View="_view" HeightPx="520" />
 
-        <div class="row" style="margin-top:0.75rem;">
-            <button class="btn" @onclick="Refresh">Refresh</button>
-            <button class="btn" @onclick="() => Step(1)">Step 1</button>
-            <button class="btn" @onclick="() => Step(16)">Step 16</button>
-            <button class="btn" @onclick="() => Step(128)">Step 128</button>
+        <details style="margin-top:0.75rem;">
+            <summary class="mono" style="cursor:pointer;">Visual controls</summary>
 
-            <div class="spacer"></div>
+            <div class="form" style="margin-top:0.75rem;">
+                <label class="lbl">Spacing XY</label>
+                <input class="input" type="number" step="0.05" @bind="_view.SpacingXY" />
 
-            <button class="btn" @onclick="SleepReplay">Sleep (gated)</button>
-        </div>
-    </section>
+                <label class="lbl">Z Scale</label>
+                <input class="input" type="number" step="0.05" @bind="_view.ZScale" />
 
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Thalamus Gates</div>
-                <div class="h-sub">TRN-like gating • routing: Vision→V1, Audio→A1, Body→S1, Internal→Core</div>
+                <label class="lbl">Node Size</label>
+                <input class="input" type="number" step="0.01" @bind="_view.NodeSize" />
+
+                <label class="lbl">Node Opacity</label>
+                <input class="input" type="number" step="0.05" @bind="_view.NodeOpacity" />
+
+                <label class="lbl">Edge Soft Fade Len</label>
+                <input class="input" type="number" step="0.1" @bind="_view.EdgeSoftFadeLen" />
+
+                <label class="lbl">Edge Hard Cull Len</label>
+                <input class="input" type="number" step="0.1" @bind="_view.EdgeHardCullLen" />
+
+                <label class="lbl">Edge Opacity</label>
+                <input class="input" type="number" step="0.05" @bind="_view.EdgeOpacity" />
+
+                <label class="lbl">Fog Density</label>
+                <input class="input" type="number" step="0.001" @bind="_view.FogDensity" />
+
+                <div class="row" style="margin-top:0.5rem; flex-wrap:wrap;">
+                    <label class="chk">
+                        <input type="checkbox" @bind="_view.ShowLaminarPlanes" />
+                        <span>Laminar planes</span>
+                    </label>
+
+                    <label class="chk">
+                        <input type="checkbox" @bind="_view.ShowGrid" />
+                        <span>Grid</span>
+                    </label>
+
+                    <label class="chk">
+                        <input type="checkbox" @bind="_view.ShowAxes" />
+                        <span>Axes</span>
+                    </label>
+
+                    <label class="chk">
+                        <input type="checkbox" @bind="_view.EnableFog" />
+                        <span>Fog</span>
+                    </label>
+                </div>
             </div>
-        </header>
-
-        <div class="form">
-            @GateSlider("Vision Gate", nameof(_gVision))
-            @GateSlider("Audio Gate", nameof(_gAudio))
-            @GateSlider("Body Gate", nameof(_gBody))
-            @GateSlider("Internal Gate", nameof(_gInternal))
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="ApplyGates">Apply</button>
-                <button class="btn" @onclick="PresetFocusVision">Focus Vision</button>
-                <button class="btn" @onclick="PresetFocusAudio">Focus Audio</button>
-            </div>
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="PresetBodyAwareness">Body</button>
-                <button class="btn" @onclick="PresetIdle">Idle</button>
-                <button class="btn" @onclick="PresetSleep">Sleep</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Modulators</div>
-                <div class="h-sub">Explicit control only • biases effective gating and dynamics</div>
-            </div>
-        </header>
-
-        <div class="form">
-            @ModSlider("Reward", nameof(UiModulators.Reward))
-            @ModSlider("Salience", nameof(UiModulators.Salience))
-            @ModSlider("Stability", nameof(UiModulators.Stability))
-            @ModSlider("Alerting", nameof(UiModulators.Alerting))
-            @ModSlider("Curiosity", nameof(UiModulators.Curiosity))
-            @ModSlider("Goal", nameof(UiModulators.Goal))
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="ApplyModulators">Apply</button>
-                <button class="btn" @onclick="ZeroModulators">Zero</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Stimulus (Routed)</div>
-                <div class="h-sub">Group: 0=Vision, 1=Audio, 2=Body, 3=Internal • passes through thalamus gate</div>
-            </div>
-        </header>
-
-        <div class="form">
-            <label>Group</label>
-            <select class="input" @bind="_stimGroup">
-                <option value="0">Vision</option>
-                <option value="1">Audio</option>
-                <option value="2">Body</option>
-                <option value="3">Internal</option>
-            </select>
-
-            <label>Rate (Hz)</label>
-            <input class="input" type="number" step="1" @bind="_stimRateHz" />
-
-            <label>Strength</label>
-            <input class="input" type="number" step="0.01" @bind="_stimStrength" />
-
-            <label>Steps</label>
-            <input class="input" type="number" step="1" @bind="_stimSteps" />
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="RunStimulus">Stimulate</button>
-                <div class="spacer"></div>
-                <button class="btn" @onclick="Refresh">Refresh</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Injection</div>
-                <div class="h-sub">External input only (exc/inh) • explicit action</div>
-            </div>
-        </header>
-
-        <div class="form">
-            <label>Node Id</label>
-            <input class="input" type="number" @bind="_inject.NodeId" />
-
-            <label>Exc</label>
-            <input class="input" type="number" step="0.01" @bind="_inject.Exc" />
-
-            <label>Inh</label>
-            <input class="input" type="number" step="0.01" @bind="_inject.Inh" />
-
-            <div class="row" style="margin-top:0.5rem;">
-                <button class="btn" @onclick="Inject">Inject</button>
-                <div class="spacer"></div>
-                <button class="btn" @onclick="Refresh">Refresh</button>
-            </div>
-        </div>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Archive</div>
-                <div class="h-sub">Save/Load engine state</div>
-            </div>
-        </header>
-
-        <div class="form">
-            <div class="row">
-                <button class="btn" @onclick="SaveArchive">Save</button>
-                <button class="btn" @onclick="LoadArchive">Load</button>
-                <div class="spacer"></div>
-                <button class="btn" @onclick="ClearArchiveText">Clear</button>
-            </div>
-
-            <label>Base64 Archive</label>
-            <textarea class="textarea" rows="8" @bind="_archiveBase64"></textarea>
-        </div>
+        </details>
     </section>
 </div>
 
 @code {
-    [Inject] private LatticeApiClient Api { get; set; } = default!;
-
     private long _stepIndex;
     private LatticeSnapshotDto? _snapshot;
 
-    private UiModulators _mods = new();
-    private UiInject _inject = new() { NodeId = 1, Exc = 0.25f, Inh = 0f };
+    private string _apiStatus = "";
+    private string _apiError = "";
 
-    // Thalamus gate controls
-    private float _gVision = 1.0f;
-    private float _gAudio = 1.0f;
-    private float _gBody = 1.0f;
-    private float _gInternal = 0.35f;
+    private RunStatusDto? _runStatus;
 
-    // Stimulus controls
-    private int _stimGroup = 0;
-    private float _stimRateHz = 8f;
-    private float _stimStrength = 0.25f;
-    private int _stimSteps = 32;
+    private int _runHz = 30;
+    private int _runStepsPerTick = 2;
 
-    private string _archiveBase64 = string.Empty;
+    private bool _autoPoll = true;
+    private int _pollMs = 66; // ~15Hz UI refresh
 
-    private string _apiStatus = string.Empty;
-    private string _apiError = string.Empty;
+    private CancellationTokenSource? _pollCts;
+    private Task? _pollTask;
+
+    private NetworkViewOptions _view = new();
 
     protected override async Task OnInitializedAsync()
     {
-        await ApplyGates();
         await Refresh();
+
+        if (_autoPoll)
+            StartPolling();
     }
 
     private async Task Refresh()
     {
-        _apiStatus = "API BaseUrl: (see appsettings: LatticeApi:BaseUrl)";
+        _apiStatus = "Snapshot endpoint: " + Api.LastResolvedSnapshotPath;
         _apiError = string.Empty;
 
         _snapshot = await Api.GetSnapshot();
+        _runStatus = await Api.RunStatus();
 
         if (_snapshot is null)
         {
-            _apiStatus += " • Snapshot: (not resolved)";
             _apiError = Api.LastError ?? "Unknown error.";
             _stepIndex = 0;
+            StateHasChanged();
             return;
         }
 
-        _apiStatus += $" • Snapshot: {Api.LastResolvedSnapshotPath}";
         _stepIndex = _snapshot.StepIndex;
+
+        if (!string.IsNullOrWhiteSpace(Api.LastError))
+            _apiError = Api.LastError!;
+
         StateHasChanged();
     }
 
@@ -228,195 +232,238 @@
         await Refresh();
     }
 
-    private async Task ApplyModulators()
-    {
-        await Api.SetModulators(_mods);
-        await Refresh();
-    }
-
-    private async Task ZeroModulators()
-    {
-        _mods = new UiModulators();
-        await ApplyModulators();
-    }
-
-    private async Task ApplyGates()
-    {
-        var req = new ThalamusGatesRequest
-        {
-            VisionGate = _gVision,
-            AudioGate = _gAudio,
-            BodyGate = _gBody,
-            InternalGate = _gInternal
-        };
-
-        await Api.SetThalamusGates(req);
-        await Refresh();
-    }
-
-    private void PresetFocusVision() { _gVision = 1.0f; _gAudio = 0.15f; _gBody = 0.25f; _gInternal = 0.30f; }
-    private void PresetFocusAudio() { _gVision = 0.15f; _gAudio = 1.0f; _gBody = 0.25f; _gInternal = 0.30f; }
-    private void PresetBodyAwareness() { _gVision = 0.25f; _gAudio = 0.25f; _gBody = 1.0f; _gInternal = 0.30f; }
-    private void PresetIdle() { _gVision = 0.55f; _gAudio = 0.55f; _gBody = 0.55f; _gInternal = 0.35f; }
-    private void PresetSleep() { _gVision = 0.05f; _gAudio = 0.05f; _gBody = 0.05f; _gInternal = 0.60f; }
-
-    private async Task Inject()
-    {
-        await Api.Inject(_inject);
-        await Refresh();
-    }
-
-    private async Task RunStimulus()
-    {
-        var req = new StimulusRequest
-        {
-            Group = _stimGroup,
-            RateHz = _stimRateHz,
-            Strength = _stimStrength,
-            Steps = _stimSteps
-        };
-
-        await Api.Stimulus(req);
-        await Refresh();
-    }
-
     private async Task SleepReplay()
     {
         await Api.SleepReplay();
         await Refresh();
     }
 
-    private async Task SaveArchive()
+    private async Task StartRunner()
     {
-        var dto = await Api.GetArchive();
-        _archiveBase64 = dto.Base64;
-    }
+        _runStatus = await Api.RunStart(new RunRequestModel
+        {
+            TargetHz = _runHz,
+            StepsPerTick = _runStepsPerTick
+        });
 
-    private async Task LoadArchive()
-    {
-        if (string.IsNullOrWhiteSpace(_archiveBase64)) return;
-        await Api.LoadArchive(new ArchiveDto { Base64 = _archiveBase64.Trim() });
+        if (_autoPoll)
+            StartPolling();
+
         await Refresh();
     }
 
-    private void ClearArchiveText() => _archiveBase64 = string.Empty;
-
-    private RenderFragment GateSlider(string title, string field) => builder =>
+    private async Task StopRunner()
     {
-        int seq = 0;
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider");
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider-h");
-
-        builder.OpenElement(seq++, "div");
-        builder.AddContent(seq++, title);
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "mono");
-        builder.AddContent(seq++, $"{GetGate(field):0.00}");
-        builder.CloseElement();
-
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "input");
-        builder.AddAttribute(seq++, "class", "range");
-        builder.AddAttribute(seq++, "type", "range");
-        builder.AddAttribute(seq++, "min", "0");
-        builder.AddAttribute(seq++, "max", "1");
-        builder.AddAttribute(seq++, "step", "0.01");
-        builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetGate(field)));
-        builder.AddAttribute(seq++, "oninput",
-            EventCallback.Factory.CreateBinder<string>(this, v => SetGate(field, v), BindConverter.FormatValue(GetGate(field))));
-        builder.CloseElement();
-
-        builder.CloseElement();
-    };
-
-    private float GetGate(string field) => field switch
-    {
-        nameof(_gVision) => _gVision,
-        nameof(_gAudio) => _gAudio,
-        nameof(_gBody) => _gBody,
-        nameof(_gInternal) => _gInternal,
-        _ => 0f
-    };
-
-    private void SetGate(string field, string raw)
-    {
-        if (!float.TryParse(raw, out var v)) return;
-        v = Math.Clamp(v, 0f, 1f);
-
-        switch (field)
-        {
-            case nameof(_gVision): _gVision = v; break;
-            case nameof(_gAudio): _gAudio = v; break;
-            case nameof(_gBody): _gBody = v; break;
-            case nameof(_gInternal): _gInternal = v; break;
-        }
+        _runStatus = await Api.RunStop();
+        await Refresh();
     }
 
-    private RenderFragment ModSlider(string title, string prop) => builder =>
+    private void StartPolling()
     {
-        int seq = 0;
+        if (_pollTask is not null && !_pollTask.IsCompleted)
+            return;
 
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider");
+        _pollCts?.Cancel();
+        _pollCts?.Dispose();
 
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "slider-h");
+        _pollCts = new CancellationTokenSource();
+        var ct = _pollCts.Token;
 
-        builder.OpenElement(seq++, "div");
-        builder.AddContent(seq++, title);
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "div");
-        builder.AddAttribute(seq++, "class", "mono");
-        builder.AddContent(seq++, $"{GetMod(prop):0.00}");
-        builder.CloseElement();
-
-        builder.CloseElement();
-
-        builder.OpenElement(seq++, "input");
-        builder.AddAttribute(seq++, "class", "range");
-        builder.AddAttribute(seq++, "type", "range");
-        builder.AddAttribute(seq++, "min", "0");
-        builder.AddAttribute(seq++, "max", "1");
-        builder.AddAttribute(seq++, "step", "0.01");
-        builder.AddAttribute(seq++, "value", BindConverter.FormatValue(GetMod(prop)));
-        builder.AddAttribute(seq++, "oninput",
-            EventCallback.Factory.CreateBinder<string>(this, v => SetMod(prop, v), BindConverter.FormatValue(GetMod(prop))));
-        builder.CloseElement();
-
-        builder.CloseElement();
-    };
-
-    private float GetMod(string prop) => prop switch
-    {
-        nameof(UiModulators.Reward) => _mods.Reward,
-        nameof(UiModulators.Salience) => _mods.Salience,
-        nameof(UiModulators.Stability) => _mods.Stability,
-        nameof(UiModulators.Alerting) => _mods.Alerting,
-        nameof(UiModulators.Curiosity) => _mods.Curiosity,
-        nameof(UiModulators.Goal) => _mods.Goal,
-        _ => 0f
-    };
-
-    private void SetMod(string prop, string raw)
-    {
-        if (!float.TryParse(raw, out var v)) return;
-        v = Math.Clamp(v, 0f, 1f);
-
-        switch (prop)
+        _pollTask = Task.Run(async () =>
         {
-            case nameof(UiModulators.Reward): _mods.Reward = v; break;
-            case nameof(UiModulators.Salience): _mods.Salience = v; break;
-            case nameof(UiModulators.Stability): _mods.Stability = v; break;
-            case nameof(UiModulators.Alerting): _mods.Alerting = v; break;
-            case nameof(UiModulators.Curiosity): _mods.Curiosity = v; break;
-            case nameof(UiModulators.Goal): _mods.Goal = v; break;
+            using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(Math.Max(16, _pollMs)));
+
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    if (!await timer.WaitForNextTickAsync(ct))
+                        break;
+
+                    if (!_autoPoll)
+                        continue;
+
+                    var snap = await Api.GetSnapshot(ct);
+                    var status = await Api.RunStatus(ct);
+
+                    await InvokeAsync(() =>
+                    {
+                        _snapshot = snap;
+                        _runStatus = status;
+                        _stepIndex = snap.StepIndex;
+                        StateHasChanged();
+                    });
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch
+                {
+                    // swallow polling errors; Api.LastError will show on manual Refresh
+                }
+            }
+        }, ct);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _pollCts?.Cancel();
+
+        if (_pollTask is not null)
+        {
+            try { await _pollTask; } catch { /* ignore */ }
         }
+
+        _pollCts?.Dispose();
     }
 }
+
+<style>
+    .page {
+        padding: 1rem;
+        max-width: 1400px;
+        margin: 0 auto;
+    }
+
+    .topbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+
+    .h1 {
+        font-size: 1.6rem;
+        font-weight: 700;
+    }
+
+    .sub {
+        opacity: 0.75;
+    }
+
+    .status {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+        margin-bottom: 1rem;
+    }
+    @@media (max-width: 1100px) {
+        .grid {
+            grid-template-columns: 1fr;
+        }
+    }
+
+    .card {
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 14px;
+        padding: 0.85rem;
+        background: rgba(0,0,0,0.22);
+    }
+
+    .card-h {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 1rem;
+        margin-bottom: 0.6rem;
+    }
+
+    .h-title {
+        font-weight: 650;
+    }
+
+    .h-sub {
+        opacity: 0.75;
+        font-size: 0.92rem;
+    }
+
+    .pill {
+        padding: 0.25rem 0.6rem;
+        border-radius: 999px;
+        border: 1px solid rgba(255,255,255,0.18);
+        font-size: 0.85rem;
+    }
+
+    .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+    }
+
+    .small {
+        font-size: 0.86rem;
+    }
+
+    .err {
+        color: #ffb3b3;
+        font-weight: 600;
+        text-align: right;
+    }
+
+    .muted {
+        opacity: 0.70;
+    }
+
+    .form {
+        display: grid;
+        grid-template-columns: 180px 1fr;
+        gap: 0.5rem 0.75rem;
+        align-items: center;
+    }
+
+    .lbl {
+        opacity: 0.85;
+    }
+
+    .input {
+        width: 100%;
+        padding: 0.35rem 0.5rem;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.18);
+        background: rgba(0,0,0,0.25);
+        color: inherit;
+    }
+
+    .row {
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+    }
+
+    .actions {
+        margin-top: 0.75rem;
+    }
+
+    .btn {
+        padding: 0.45rem 0.8rem;
+        border-radius: 12px;
+        border: 1px solid rgba(255,255,255,0.18);
+        background: rgba(255,255,255,0.06);
+        color: inherit;
+        cursor: pointer;
+    }
+
+        .btn:hover {
+            background: rgba(255,255,255,0.10);
+        }
+
+    .spacer {
+        flex: 1;
+    }
+
+    .chk {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0.25rem 0.4rem;
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,0.10);
+    }
+</style>

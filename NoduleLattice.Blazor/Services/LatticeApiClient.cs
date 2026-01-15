@@ -1,97 +1,159 @@
-﻿using System.Net;
+﻿// ============================================================================
+// FILE: NoduleLattice.Blazor/Services/LatticeApiClient.cs
+// PURPOSE:
+//   Single, canonical client (no duplicates).
+//   - Keeps Home.razor expected surface
+//   - Adds runner endpoints
+// ============================================================================
+
 using System.Net.Http.Json;
 using NoduleLattice.Blazor.Models;
 
 namespace NoduleLattice.Blazor.Services;
 
-/// <summary>
-/// Snapshot-only client to NoduleLattice.Api.
-/// Includes simple snapshot endpoint discovery and explicit action calls.
-/// </summary>
 public sealed class LatticeApiClient
 {
     private readonly HttpClient _http;
 
-    public LatticeApiClient(HttpClient http) => _http = http;
-
-    private static readonly string[] SnapshotCandidates =
-    [
-        "api/lattice/snapshot",
-        "api/snapshot",
-        "lattice/snapshot",
-        "snapshot"
-    ];
-
-    public string? LastResolvedSnapshotPath { get; private set; }
     public string? LastError { get; private set; }
+    public string LastResolvedSnapshotPath { get; }
 
-    public async Task<LatticeSnapshotDto?> GetSnapshot()
+    public LatticeApiClient(HttpClient http)
     {
-        LastError = null;
+        _http = http;
 
-        foreach (var path in SnapshotCandidates)
-        {
-            var result = await TryGetSnapshot(path);
-            if (result is not null)
-            {
-                LastResolvedSnapshotPath = path;
-                return result;
-            }
-        }
-
-        LastResolvedSnapshotPath = null;
-        LastError ??= "No known snapshot endpoint responded successfully (404/connection).";
-        return null;
+        var baseUri = _http.BaseAddress?.ToString() ?? string.Empty;
+        if (!baseUri.EndsWith("/")) baseUri += "/";
+        LastResolvedSnapshotPath = baseUri + "api/lattice/snapshot";
     }
 
-    private async Task<LatticeSnapshotDto?> TryGetSnapshot(string path)
+    public async Task<LatticeSnapshotDto> GetSnapshot(CancellationToken ct = default)
     {
         try
         {
-            using var resp = await _http.GetAsync(path);
-
-            if (resp.StatusCode == HttpStatusCode.NotFound)
-                return null;
-
-            resp.EnsureSuccessStatusCode();
-            return await resp.Content.ReadFromJsonAsync<LatticeSnapshotDto>();
+            LastError = null;
+            var snap = await _http.GetFromJsonAsync<LatticeSnapshotDto>("api/lattice/snapshot", ct);
+            return snap ?? new LatticeSnapshotDto();
         }
         catch (Exception ex)
         {
             LastError = ex.Message;
-            return null;
+            return new LatticeSnapshotDto();
         }
     }
 
-    public async Task Step(int steps)
-        => await _http.PostAsJsonAsync("api/lattice/step", new StepRequest { Steps = steps });
-
-    public async Task Inject(UiInject inject)
-        => await _http.PostAsJsonAsync("api/lattice/inject", new InjectRequest { NodeId = inject.NodeId, Exc = inject.Exc, Inh = inject.Inh });
-
-    public async Task SetModulators(UiModulators mods)
-        => await _http.PostAsJsonAsync("api/lattice/modulators", new ModulatorsRequest
+    public async Task Step(int steps, CancellationToken ct = default)
+    {
+        try
         {
-            Reward = mods.Reward,
-            Salience = mods.Salience,
-            Stability = mods.Stability,
-            Alerting = mods.Alerting,
-            Curiosity = mods.Curiosity,
-            Goal = mods.Goal
-        });
+            LastError = null;
+            using var resp = await _http.PostAsJsonAsync("api/lattice/step", new StepRequest { Steps = steps }, ct);
+            resp.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
+    }
 
-    public async Task SetThalamusGates(ThalamusGatesRequest req)
-        => await _http.PostAsJsonAsync("api/lattice/thalamus", req);
+    // UI view models -> request models
+    public Task SetModulators(UiModulators ui, CancellationToken ct = default)
+        => SetModulators(new ModulatorsRequestModel
+        {
+            Reward = ui.Reward,
+            Salience = ui.Salience,
+            Stability = ui.Stability,
+            Alerting = ui.Alerting,
+            Curiosity = ui.Curiosity,
+            Goal = ui.Goal
+        }, ct);
 
-    public async Task SleepReplay()
-        => await _http.PostAsJsonAsync("api/lattice/sleep-replay", new SleepReplayRequest { Run = true });
+    public Task SetModulators(ModulatorsRequestModel req, CancellationToken ct = default)
+        => Post("api/lattice/modulators", req, ct);
 
-    public async Task Stimulus(StimulusRequest req)
-        => await _http.PostAsJsonAsync("api/lattice/stimulus", req);
+    public Task SetThalamusGates(ThalamusGatesRequestModel req, CancellationToken ct = default)
+        => Post("api/lattice/thalamus", req, ct);
 
-    public async Task<ArchiveDto> GetArchive()
-        => (await _http.GetFromJsonAsync<ArchiveDto>("api/lattice/archive")) ?? new ArchiveDto();
+    public Task Inject(UiInject ui, CancellationToken ct = default)
+        => Post("api/lattice/inject", new InjectRequest { NodeId = ui.NodeId, Exc = ui.Exc, Inh = ui.Inh }, ct);
 
-    public async Task LoadArchive(ArchiveDto dto)
-        => await _http.PostAsJsonAsync("api/lattice/archive", dto);
+    public Task Stimulus(StimulusRequestModel req, CancellationToken ct = default)
+        => Post("api/lattice/stimulus", req, ct);
+
+    public Task SleepReplay(CancellationToken ct = default)
+        => SleepReplay(true, ct);
+
+    public Task SleepReplay(bool run, CancellationToken ct = default)
+        => Post("api/lattice/sleep-replay", new SleepReplayRequestModel { Run = run }, ct);
+
+    // ---------------- Runner ----------------
+
+    public async Task<RunStatusDto> RunStart(RunRequestModel req, CancellationToken ct = default)
+    {
+        try
+        {
+            LastError = null;
+
+            using var resp = await _http.PostAsJsonAsync("api/lattice/run/start", req, ct);
+            resp.EnsureSuccessStatusCode();
+
+            return (await resp.Content.ReadFromJsonAsync<RunStatusDto>(cancellationToken: ct))
+                   ?? new RunStatusDto();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            return new RunStatusDto { Running = false, LastError = ex.Message };
+        }
+    }
+
+    public async Task<RunStatusDto> RunStop(CancellationToken ct = default)
+    {
+        try
+        {
+            LastError = null;
+
+            using var resp = await _http.PostAsync("api/lattice/run/stop", content: null, ct);
+            resp.EnsureSuccessStatusCode();
+
+            return (await resp.Content.ReadFromJsonAsync<RunStatusDto>(cancellationToken: ct))
+                   ?? new RunStatusDto();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            return new RunStatusDto { Running = false, LastError = ex.Message };
+        }
+    }
+
+    public async Task<RunStatusDto> RunStatus(CancellationToken ct = default)
+    {
+        try
+        {
+            LastError = null;
+
+            var dto = await _http.GetFromJsonAsync<RunStatusDto>("api/lattice/run/status", ct);
+            return dto ?? new RunStatusDto();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            return new RunStatusDto { Running = false, LastError = ex.Message };
+        }
+    }
+
+    private async Task Post<T>(string path, T body, CancellationToken ct)
+    {
+        try
+        {
+            LastError = null;
+
+            using var resp = await _http.PostAsJsonAsync(path, body, ct);
+            resp.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
+    }
 }

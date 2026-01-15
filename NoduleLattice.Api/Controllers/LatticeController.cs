@@ -1,5 +1,8 @@
 ﻿using Microsoft.AspNetCore.Mvc;
-using NoduleLattice.Api.Models;
+using NoduleLattice.Api.Dtos;
+
+
+//using NoduleLattice.Api.Models;
 using NoduleLattice.Api.Services;
 
 namespace NoduleLattice.Api.Controllers;
@@ -9,15 +12,17 @@ namespace NoduleLattice.Api.Controllers;
 public sealed class LatticeController : ControllerBase
 {
     private readonly LatticeHostService _host;
+    private readonly LatticeRunnerService _runner;
 
-    public LatticeController(LatticeHostService host)
+    public LatticeController(LatticeHostService host, LatticeRunnerService runner)
     {
         _host = host;
+        _runner = runner;
     }
 
-    [HttpGet("snapshot")]
-    public ActionResult<LatticeSnapshotDto> GetSnapshot()
-        => Ok(_host.GetSnapshot());
+    [HttpPost("create")]
+    public ActionResult<LatticeSnapshotDto> Create([FromBody] CreateLatticeRequest req)
+        => Ok(_host.Create(req));
 
     [HttpPost("step")]
     public IActionResult Step([FromBody] StepRequest req)
@@ -25,6 +30,10 @@ public sealed class LatticeController : ControllerBase
         _host.Step(req.Steps);
         return Ok();
     }
+
+    [HttpGet("snapshot")]
+    public ActionResult<LatticeSnapshotDto> Snapshot()
+        => Ok(_host.GetSnapshot());
 
     [HttpPost("inject")]
     public IActionResult Inject([FromBody] InjectRequest req)
@@ -37,13 +46,6 @@ public sealed class LatticeController : ControllerBase
     public IActionResult Modulators([FromBody] ModulatorsRequest req)
     {
         _host.SetModulators(req);
-        return Ok();
-    }
-
-    [HttpPost("sleep-replay")]
-    public IActionResult SleepReplay([FromBody] SleepReplayRequest req)
-    {
-        _host.SleepReplay(req.Run);
         return Ok();
     }
 
@@ -61,6 +63,13 @@ public sealed class LatticeController : ControllerBase
         return Ok();
     }
 
+    [HttpPost("sleep-replay")]
+    public IActionResult SleepReplay([FromBody] SleepReplayRequest req)
+    {
+        _host.SleepReplay(req.Run);
+        return Ok();
+    }
+
     [HttpGet("archive")]
     public ActionResult<ArchiveDto> GetArchive()
         => Ok(_host.SaveArchive());
@@ -71,4 +80,28 @@ public sealed class LatticeController : ControllerBase
         _host.LoadArchive(dto);
         return Ok();
     }
+
+    [HttpPost("validate")]
+    public IActionResult Validate()
+        => Ok(_host.Validate());
+
+    // ---------------- Runner ----------------
+
+    [HttpPost("run/start")]
+    public ActionResult<RunStatusDto> RunStart([FromBody] RunRequest req)
+    {
+        _runner.Start(req.TargetHz, req.StepsPerTick);
+        return Ok(_runner.Status());
+    }
+
+    [HttpPost("run/stop")]
+    public ActionResult<RunStatusDto> RunStop()
+    {
+        _runner.Stop();
+        return Ok(_runner.Status());
+    }
+
+    [HttpGet("run/status")]
+    public ActionResult<RunStatusDto> RunStatus()
+        => Ok(_runner.Status());
 }

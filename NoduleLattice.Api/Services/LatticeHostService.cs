@@ -1,118 +1,165 @@
-﻿using System.Text;
-using System.Text.Json;
-using NoduleLattice.Api.Models;
+﻿// ============================================================================
+// FILE: NoduleLattice.Api/Services/LatticeHostService.cs
+// PURPOSE:
+//   Create() builds a cortical slab and seeds cortex-like connectivity:
+//
+//   - Within-layer local connectivity (horizontal fibres)
+//   - Columnar vertical connectivity (x,y constant; z±1)
+//   - Feed-forward laminar connectivity (z -> z+1, small XY radius)
+//
+//   NOTE:
+//   Core engine keeps Int3 positions. “Jitter” is implemented by choosing edges
+//   that preserve columns/laminae; the renderer will still show a clean sheet.
+//   If you later want true jittered positions, we can extend snapshot DTOs to
+//   include float positions without touching core state.
+// ============================================================================
+using System.Collections.Concurrent;
+using NoduleLattice.Abstractions.Math;
+using NoduleLattice.Abstractions.Modulation;
+using NoduleLattice.Abstractions.Nodes;
+using NoduleLattice.Abstractions.Synapses;
+using NoduleLattice.Api.Dtos;
+using NoduleLattice.Core.Determinism;
+using NoduleLattice.Core.Modulation;
+using NoduleLattice.Core.Nodes;
+using NoduleLattice.Core.Runtime;
+using NoduleLattice.Core.Runtime.Snapshots;
+using NoduleLattice.Core.Synapses;
+using NoduleLattice.Core.Time;
+using NoduleLattice.Core.Topology;
 
 namespace NoduleLattice.Api.Services;
 
-/// <summary>
-/// Minimal, functional host for the lattice.
-///
-/// Entry 013f:
-/// - Thalamus Phase 1: channels + gates + routing
-/// - Stimulus routes through thalamus into target regions
-/// - Gates are explicit, but modulators bias effective throughput (state)
-/// </summary>
 public sealed class LatticeHostService
 {
     private readonly object _gate = new();
-    private readonly Random _rng = new(12345);
 
-    private long _step;
-    private readonly List<NodeState> _nodes = new();
-    private readonly List<EdgeState> _edges = new();
+    private readonly UniformModulatorField _mods = new();
+    private readonly FixedTimebase _time = new();
 
-    private ModulatorsRequest _mods = new();
-    private ThalamusState _thal = new();
+    private DeterministicRng _rng = new(0xC0FFEEu);
+    private Synapse2Config _synCfg = new();
+    private StructuralPolicy _policy = new();
+
+    private BasicTopologyManager _topology;
+    private readonly MembraneIntegrator _membrane = new();
+    private readonly DemandEstimator _demand = new();
+    private UtilityProbe _probe;
+
+    private NoduleLatticeEngine _engine;
+
+    private long _nextSynapseId = 1;
+
+    private ThalamusGates _thalamus = ThalamusGates.Default;
+
+    private readonly ConcurrentDictionary<int, int[]> _groups = new();
+
+    // 1-based id -> position
+    private Int3[] _posById = Array.Empty<Int3>();
 
     public LatticeHostService()
     {
-        // Small 3D cloud (sanity view)
-        const int n = 240;
+        _topology = new BasicTopologyManager(_policy, _synCfg, _rng);
+        _probe = new UtilityProbe(new UtilityProbeConfig());
 
-        for (int i = 0; i < n; i++)
+        _engine = new NoduleLatticeEngine(
+            _time,
+            _mods,
+            _topology,
+            _membrane,
+            _demand,
+            _probe);
+
+        Create(new CreateLatticeRequest());
+    }
+
+    public LatticeSnapshotDto Create(CreateLatticeRequest req)
+    {
+        lock (_gate)
         {
-            _nodes.Add(new NodeState
-            {
-                Id = i + 1,
-                X = _rng.Next(-10, 11),
-                Y = _rng.Next(-6, 7),
-                Z = _rng.Next(-10, 11),
-                V = (float)(_rng.NextDouble() * 2.0 - 1.0),
-                Rate = 0f,
-                Spiked = false
-            });
+            _time.Reset(0);
+
+            _rng = new DeterministicRng((uint)req.Seed);
+            _nextSynapseId = 1;
+
+            _synCfg = new Synapse2Config();
+            _policy = new StructuralPolicy();
+            _topology = new BasicTopologyManager(_policy, _synCfg, _rng);
+            _probe = new UtilityProbe(new UtilityProbeConfig());
+
+            _engine = new NoduleLatticeEngine(
+                _time,
+                _mods,
+                _topology,
+                _membrane,
+                _demand,
+                _probe,
+                structuralPeriodSteps: System.Math.Max(8, req.StructuralPeriodSteps),
+                maxDelaySteps: System.Math.Max(1, req.MaxDelaySteps));
+
+            _engine.ClearAll();
+            _groups.Clear();
+
+            int sx = System.Math.Max(1, req.SizeX);
+            int sy = System.Math.Max(1, req.SizeY);
+            int sz = System.Math.Max(1, req.SizeZ);
+
+            int nodeCount = sx * sy * sz;
+            _posById = new Int3[nodeCount + 1];
+
+            // Build cortical slab (wide XY, layered Z)
+            int id = 1;
+            for (int z = 0; z < sz; z++)
+                for (int y = 0; y < sy; y++)
+                    for (int x = 0; x < sx; x++)
+                    {
+                        var p = new Int3(x, y, z);
+                        _posById[id] = p;
+
+                        var node = new Nodule(new NoduleId(id), p);
+                        _engine.AddNode(node);
+                        id++;
+                    }
+
+            SeedCortexConnectivity(
+                sx: sx,
+                sy: sy,
+                sz: sz,
+                totalSynapses: System.Math.Max(0, req.InitialSynapses),
+                localRadiusXY: System.Math.Max(1, req.LocalRadiusXY),
+                columnLinksPerNode: System.Math.Max(0, req.ColumnLinksPerNode),
+                feedForwardLinksPerNode: System.Math.Max(0, req.FeedForwardLinksPerNode),
+                maxOutPerNode: System.Math.Max(1, req.MaxOutPerNode),
+                maxDelaySteps: System.Math.Max(1, req.MaxDelaySteps));
+
+            // Keep your existing “channel bands” grouping (works fine with a slab)
+            BuildDefaultGroups(sx, sy, sz);
+
+            return Map(_engine.GetSnapshot());
         }
+    }
 
-        // Random sparse edges
-        long eid = 1;
-        for (int i = 0; i < n * 4; i++)
+    public void Step(int steps)
+    {
+        lock (_gate)
         {
-            int pre = _rng.Next(1, n + 1);
-            int post = _rng.Next(1, n + 1);
-            if (pre == post) continue;
-
-            _edges.Add(new EdgeState
-            {
-                Id = eid++,
-                Pre = pre,
-                Post = post,
-                Kind = _rng.NextDouble() < 0.75 ? 0 : 1,
-                W = (float)(_rng.NextDouble() * 1.2)
-            });
+            _engine.Step(System.Math.Max(1, steps));
         }
-
-        // Default thalamus gates: sensory open, internal partially open
-        _thal = new ThalamusState
-        {
-            VisionGate = 1.0f,
-            AudioGate = 1.0f,
-            BodyGate = 1.0f,
-            InternalGate = 0.35f
-        };
     }
 
     public LatticeSnapshotDto GetSnapshot()
     {
         lock (_gate)
         {
-            return new LatticeSnapshotDto
-            {
-                StepIndex = _step,
-                Nodes = _nodes.Select(n => new NodeSnapDto
-                {
-                    Id = n.Id,
-                    Pos = new Pos3Dto { X = n.X, Y = n.Y, Z = n.Z },
-                    V = n.V,
-                    Rate = n.Rate,
-                    Spiked = n.Spiked
-                }).ToList(),
-                Synapses = _edges.Select(e => new EdgeSnapDto
-                {
-                    Id = e.Id,
-                    Pre = e.Pre,
-                    Post = e.Post,
-                    W = e.W,
-                    Kind = e.Kind
-                }).ToList()
-            };
+            return Map(_engine.GetSnapshot());
         }
-    }
-
-    public void Step(int steps)
-    {
-        if (steps <= 0) return;
-        lock (_gate) StepInternal_NoLock(steps);
     }
 
     public void Inject(InjectRequest req)
     {
         lock (_gate)
         {
-            var n = _nodes.FirstOrDefault(x => x.Id == req.NodeId);
-            if (n is null) return;
-
-            n.V += req.Exc;
-            n.V -= req.Inh;
+            _engine.InjectInput(new NoduleId(req.NodeId), req.Exc, req.Inh);
         }
     }
 
@@ -120,7 +167,24 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            _mods = req;
+            _engine.SetModulators(new ModulatorVector
+            {
+                Reward = req.Reward,
+                Salience = req.Salience,
+                Stability = req.Stability,
+                Alerting = req.Alerting,
+                Curiosity = req.Curiosity,
+                Goal = req.Goal
+            });
+        }
+    }
+
+    public void SleepReplay(bool run)
+    {
+        lock (_gate)
+        {
+            if (run)
+                _engine.SleepReplay();
         }
     }
 
@@ -128,100 +192,34 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            _thal.VisionGate = Clamp01(req.VisionGate);
-            _thal.AudioGate = Clamp01(req.AudioGate);
-            _thal.BodyGate = Clamp01(req.BodyGate);
-            _thal.InternalGate = Clamp01(req.InternalGate);
+            _thalamus = new ThalamusGates(
+                Vision: Clamp01(req.VisionGate),
+                Audio: Clamp01(req.AudioGate),
+                Body: Clamp01(req.BodyGate),
+                Internal: Clamp01(req.InternalGate));
         }
     }
 
-    public void SleepReplay(bool run)
-    {
-        if (!run) return;
-
-        // Minimal placeholder: close sensory gates, increase internal gate slightly.
-        ModulatorsRequest savedMods;
-        ThalamusState savedThal;
-
-        lock (_gate)
-        {
-            savedMods = _mods;
-            savedThal = _thal;
-
-            _mods = new ModulatorsRequest
-            {
-                Reward = savedMods.Reward,
-                Salience = savedMods.Salience,
-                Stability = MathF.Max(savedMods.Stability, 0.85f),
-                Alerting = MathF.Min(savedMods.Alerting, 0.15f),
-                Curiosity = savedMods.Curiosity,
-                Goal = savedMods.Goal
-            };
-
-            _thal = new ThalamusState
-            {
-                VisionGate = 0.05f,
-                AudioGate = 0.05f,
-                BodyGate = 0.05f,
-                InternalGate = MathF.Max(savedThal.InternalGate, 0.55f)
-            };
-
-            StepInternal_NoLock(96);
-
-            _mods = savedMods;
-            _thal = savedThal;
-        }
-    }
-
-    /// <summary>
-    /// Explicit sensory stimulation routed through thalamus.
-    /// Group: 0=Vision, 1=Audio, 2=Body, 3=Internal (reserved).
-    ///
-    /// Implementation:
-    /// - Generate Poisson events from the channel source band
-    /// - Route each event into the channel target region, scaled by EffectiveGate
-    /// - Advance dynamics each tick
-    /// </summary>
     public void Stimulus(StimulusRequest req)
     {
         lock (_gate)
         {
-            var sources = SelectSourceBand(req.Group);
-            var targets = SelectTargetRegion(req.Group);
-            if (targets.Count == 0) return;
+            if (!_groups.TryGetValue(req.Group, out var ids) || ids.Length == 0)
+                return;
 
-            // Poisson per tick: p = rateHz * dt; choose dt=0.02 (~50Hz)
-            float dt = 0.02f;
-            float p = Math.Clamp(req.RateHz * dt, 0f, 1f);
-            float baseAmp = req.Strength;
+            float gate = _thalamus.ForGroup(req.Group);
+            float eff = System.Math.Max(0f, req.RateHz) * Clamp01(req.Strength) * gate;
 
-            int steps = Math.Max(1, req.Steps);
+            if (eff <= 0.0001f) return;
 
-            for (int t = 0; t < steps; t++)
-            {
-                float gEff = EffectiveGate(req.Group);
-                if (gEff > 0.0001f)
-                {
-                    // if a channel has no external sources (internal), we synthesize a small number of events
-                    int eventCount = sources.Count > 0 ? sources.Count : 12;
+            float per = eff / System.Math.Max(1, ids.Length);
 
-                    for (int i = 0; i < eventCount; i++)
-                    {
-                        if (_rng.NextDouble() >= p) continue;
+            foreach (var id in ids)
+                _engine.InjectInput(new NoduleId(id), per);
 
-                        // pick a target and inject
-                        var tgt = targets[_rng.Next(targets.Count)];
-
-                        // precision: higher stability -> less injection noise
-                        float precision = 0.55f + 0.40f * Clamp01(_mods.Stability);
-                        float noise = ((float)_rng.NextDouble() * 2f - 1f) * (1f - precision) * 0.08f;
-
-                        tgt.V += (baseAmp * gEff) + noise;
-                    }
-                }
-
-                StepInternal_NoLock(1);
-            }
+            int burstSteps = System.Math.Max(0, req.Steps);
+            if (burstSteps > 0)
+                _engine.Step(burstSteps);
         }
     }
 
@@ -229,200 +227,296 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            var payload = new ArchivePayload
-            {
-                Step = _step,
-                Mods = _mods,
-                Thal = _thal,
-                Nodes = _nodes,
-                Edges = _edges
-            };
-
-            var json = JsonSerializer.Serialize(payload);
-            var b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
-            return new ArchiveDto { Base64 = b64 };
+            var bytes = _engine.Save();
+            return new ArchiveDto { Base64 = Convert.ToBase64String(bytes) };
         }
     }
 
     public void LoadArchive(ArchiveDto dto)
     {
-        if (string.IsNullOrWhiteSpace(dto.Base64)) return;
-
         lock (_gate)
         {
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(dto.Base64.Trim()));
-            var payload = JsonSerializer.Deserialize<ArchivePayload>(json);
-            if (payload is null) return;
+            var bytes = Convert.FromBase64String(dto.Base64);
+            _engine.Load(bytes);
 
-            _step = payload.Step;
-            _mods = payload.Mods ?? new ModulatorsRequest();
-            _thal = payload.Thal ?? new ThalamusState();
-
-            _nodes.Clear();
-            _nodes.AddRange(payload.Nodes ?? new List<NodeState>());
-
-            _edges.Clear();
-            _edges.AddRange(payload.Edges ?? new List<EdgeState>());
+            RebuildGroupsFromSnapshot(_engine.GetSnapshot());
         }
     }
 
-    // -----------------------
-    // Thalamus helpers
-    // -----------------------
-
-    private float EffectiveGate(int group)
+    public object Validate()
     {
-        // explicit base gates
-        float baseGate = group switch
+        lock (_gate)
         {
-            0 => _thal.VisionGate,
-            1 => _thal.AudioGate,
-            2 => _thal.BodyGate,
-            3 => _thal.InternalGate,
-            _ => 1f
-        };
+            var snap = _engine.GetSnapshot();
+            var errors = new List<string>();
 
-        // state effect: alerting opens throughput, stability reduces disruptive variability
-        float alert = Clamp01(_mods.Alerting);
-        float stab = Clamp01(_mods.Stability);
+            if (snap.StepIndex < 0) errors.Add("StepIndex < 0");
+            if (snap.Nodes.Count == 0) errors.Add("No nodes present");
 
-        float stateFactor = (0.55f + 0.60f * alert) * (0.80f + 0.20f * stab);
-
-        // top-down bias: goal opens sensory lanes selectively; salience opens whichever lane is being used
-        float goal = Clamp01(_mods.Goal);
-        float sal = Clamp01(_mods.Salience);
-
-        float bias = 1.0f + 0.25f * goal + 0.20f * sal;
-
-        return Clamp01(baseGate * stateFactor * bias);
-    }
-
-    private List<NodeState> SelectSourceBand(int group)
-    {
-        // External input interfaces.
-        return group switch
-        {
-            0 => _nodes.Where(n => n.X <= -7).ToList(), // Vision afferents
-            1 => _nodes.Where(n => n.Z <= -7).ToList(), // Audio afferents
-            2 => _nodes.Where(n => n.Y <= -4).ToList(), // Body afferents
-            3 => new List<NodeState>(),                 // Internal has no external source band
-            _ => _nodes.Where(n => n.X <= -7).ToList()
-        };
-    }
-
-    private List<NodeState> SelectTargetRegion(int group)
-    {
-        // Cortical entry zones.
-        return group switch
-        {
-            0 => _nodes.Where(n => n.X >= +6).ToList(),
-            1 => _nodes.Where(n => n.Z >= +6).ToList(),
-            2 => _nodes.Where(n => n.Y >= +3).ToList(),
-            3 => _nodes.Where(n => Math.Abs(n.X) <= 2 && Math.Abs(n.Y) <= 2 && Math.Abs(n.Z) <= 2).ToList(),
-            _ => _nodes.Where(n => Math.Abs(n.X) <= 2 && Math.Abs(n.Y) <= 2 && Math.Abs(n.Z) <= 2).ToList()
-        };
-    }
-
-    // -----------------------
-    // Dynamics
-    // -----------------------
-
-    private void StepInternal_NoLock(int steps)
-    {
-        for (int s = 0; s < steps; s++)
-        {
-            _step++;
-
-            foreach (var n in _nodes)
-                n.Spiked = false;
-
-            var byId = _nodes.ToDictionary(x => x.Id);
-
-            // 1) Synaptic integration (strong)
-            foreach (var e in _edges)
+            foreach (var n in snap.Nodes)
             {
-                if (!byId.TryGetValue(e.Pre, out var pre)) continue;
-                if (!byId.TryGetValue(e.Post, out var post)) continue;
-
-                float current = pre.V * e.W * 0.08f;
-                if (e.Kind == 1) current = -current;
-
-                post.V += current;
+                if (float.IsNaN(n.V) || float.IsInfinity(n.V)) errors.Add($"Node {n.Id} has invalid V");
+                if (float.IsNaN(n.Rate) || float.IsInfinity(n.Rate)) errors.Add($"Node {n.Id} has invalid Rate");
             }
 
-            // 2) Modulators influence gain/noise/threshold
-            float reward = Clamp01(_mods.Reward);
-            float sal = Clamp01(_mods.Salience);
-            float stab = Clamp01(_mods.Stability);
-            float alert = Clamp01(_mods.Alerting);
-            float curiosity = Clamp01(_mods.Curiosity);
-            float goal = Clamp01(_mods.Goal);
-
-            float gain = 1.0f + 0.35f * alert + 0.25f * sal + 0.15f * curiosity + 0.10f * goal;
-            float noiseAmp = 0.08f * (1f - 0.70f * stab);
-
-            foreach (var n in _nodes)
+            foreach (var e in snap.Synapses)
             {
-                float noise = ((float)_rng.NextDouble() * 2f - 1f) * noiseAmp;
-
-                n.V = (n.V * 0.93f + noise) * gain;
-
-                float thr = 1.0f - (0.12f * reward + 0.08f * sal);
-
-                if (n.V > thr)
-                {
-                    n.Spiked = true;
-                    n.V = -0.65f;
-                    n.Rate = Clamp01(n.Rate * 0.85f + 0.35f);
-                }
-                else
-                {
-                    n.Rate = Clamp01(n.Rate * 0.92f + (MathF.Max(n.V, 0f) * 0.02f));
-                }
+                if (e.Pre == e.Post) errors.Add($"Self-edge {e.Id} ({e.Pre}->{e.Post})");
+                if (float.IsNaN(e.W) || float.IsInfinity(e.W)) errors.Add($"Edge {e.Id} has invalid W");
             }
+
+            return new
+            {
+                ok = errors.Count == 0,
+                step = snap.StepIndex,
+                nodes = snap.Nodes.Count,
+                synapses = snap.Synapses.Count,
+                thalamus = new { _thalamus.Vision, _thalamus.Audio, _thalamus.Body, _thalamus.Internal },
+                errors
+            };
         }
     }
 
-    // -----------------------
-    // Archive + helpers
-    // -----------------------
+    // ------------------------ Cortex seeding ------------------------
+
+    private void SeedCortexConnectivity(
+        int sx,
+        int sy,
+        int sz,
+        int totalSynapses,
+        int localRadiusXY,
+        int columnLinksPerNode,
+        int feedForwardLinksPerNode,
+        int maxOutPerNode,
+        int maxDelaySteps)
+    {
+        if (totalSynapses <= 0) return;
+
+        int nodeCount = sx * sy * sz;
+
+        // out-degree tracking
+        var outCount = new int[nodeCount + 1];
+
+        // 1) Columnar vertical links (strongly preserves “cortex” look)
+        // For each node: connect to z+1 and/or z-1 at same (x,y)
+        int made = 0;
+        for (int pre = 1; pre <= nodeCount && made < totalSynapses; pre++)
+        {
+            var p = _posById[pre];
+            for (int k = 0; k < columnLinksPerNode && made < totalSynapses; k++)
+            {
+                if (outCount[pre] >= maxOutPerNode) break;
+
+                int dz = (NextFloat01() < 0.5f) ? 1 : -1;
+                int nz = p.Z + dz;
+                if (nz < 0 || nz >= sz) continue;
+
+                int post = IdFromXYZ(p.X, p.Y, nz, sx, sy);
+                if (post == pre) continue;
+
+                AddSyn(pre, post, outCount, maxOutPerNode, maxDelaySteps);
+                made++;
+            }
+        }
+
+        // 2) Feed-forward laminar links (z -> z+1) with small XY offsets
+        for (int pre = 1; pre <= nodeCount && made < totalSynapses; pre++)
+        {
+            var p = _posById[pre];
+            if (p.Z >= sz - 1) continue;
+
+            for (int k = 0; k < feedForwardLinksPerNode && made < totalSynapses; k++)
+            {
+                if (outCount[pre] >= maxOutPerNode) break;
+
+                int dx = NextInt(-localRadiusXY, localRadiusXY + 1);
+                int dy = NextInt(-localRadiusXY, localRadiusXY + 1);
+
+                int nx = p.X + dx;
+                int ny = p.Y + dy;
+                int nz = p.Z + 1;
+
+                if (nx < 0 || nx >= sx) continue;
+                if (ny < 0 || ny >= sy) continue;
+
+                int post = IdFromXYZ(nx, ny, nz, sx, sy);
+                if (post == pre) continue;
+
+                AddSyn(pre, post, outCount, maxOutPerNode, maxDelaySteps);
+                made++;
+            }
+        }
+
+        // 3) Within-layer local recurrent fibres to fill remaining budget
+        int attempts = 0;
+        int maxAttempts = System.Math.Max(10_000, (totalSynapses - made) * 25);
+
+        while (made < totalSynapses && attempts < maxAttempts)
+        {
+            attempts++;
+
+            int pre = NextInt(1, nodeCount + 1);
+            if (outCount[pre] >= maxOutPerNode) continue;
+
+            var p = _posById[pre];
+
+            int dx = NextInt(-localRadiusXY, localRadiusXY + 1);
+            int dy = NextInt(-localRadiusXY, localRadiusXY + 1);
+            if (dx == 0 && dy == 0) continue;
+
+            int nx = p.X + dx;
+            int ny = p.Y + dy;
+            int nz = p.Z; // same layer
+
+            if (nx < 0 || nx >= sx) continue;
+            if (ny < 0 || ny >= sy) continue;
+
+            int post = IdFromXYZ(nx, ny, nz, sx, sy);
+            if (post == pre) continue;
+
+            AddSyn(pre, post, outCount, maxOutPerNode, maxDelaySteps);
+            made++;
+        }
+    }
+
+    private void AddSyn(int pre, int post, int[] outCount, int maxOutPerNode, int maxDelaySteps)
+    {
+        if (outCount[pre] >= maxOutPerNode) return;
+
+        var kind = (NextFloat01() < 0.80f) ? SynapseKind.Excitatory : SynapseKind.Inhibitory;
+
+        // Slightly weaker weights by default in cortex to avoid spaghetti dominance
+        float w = 0.02f + NextFloat01() * 0.16f;
+
+        int delay = NextInt(0, System.Math.Max(1, maxDelaySteps));
+
+        var syn = new Synapse2(
+            id: new SynapseId(_nextSynapseId++),
+            pre: new NoduleId(pre),
+            post: new NoduleId(post),
+            kind: kind,
+            cfg: _synCfg,
+            initialWeight: w,
+            initialGain: 1.0f,
+            delaySteps: delay,
+            state: null);
+
+        _engine.AddSynapse(syn);
+        outCount[pre]++;
+    }
+
+    private static int IdFromXYZ(int x, int y, int z, int sx, int sy)
+        => 1 + x + (y * sx) + (z * sx * sy);
+
+    // ------------------------ grouping ------------------------
+
+    private void BuildDefaultGroups(int sx, int sy, int sz)
+    {
+        int nodeCount = sx * sy * sz;
+        if (nodeCount <= 0) return;
+
+        var vision = new List<int>();
+        var audio = new List<int>();
+        var body = new List<int>();
+
+        int id = 1;
+        for (int z = 0; z < sz; z++)
+            for (int y = 0; y < sy; y++)
+                for (int x = 0; x < sx; x++)
+                {
+                    if (x < (sx / 3)) vision.Add(id);
+                    else if (x < (2 * sx / 3)) audio.Add(id);
+                    else body.Add(id);
+
+                    id++;
+                }
+
+        _groups[0] = vision.ToArray();
+        _groups[1] = audio.ToArray();
+        _groups[2] = body.ToArray();
+        _groups[3] = Array.Empty<int>();
+    }
+
+    private void RebuildGroupsFromSnapshot(LatticeSnapshot snap)
+    {
+        if (snap.Nodes.Count == 0) return;
+
+        int minX = snap.Nodes.Min(n => n.Pos.X);
+        int maxX = snap.Nodes.Max(n => n.Pos.X);
+        int span = System.Math.Max(1, (maxX - minX + 1));
+
+        var vision = new List<int>();
+        var audio = new List<int>();
+        var body = new List<int>();
+
+        foreach (var n in snap.Nodes)
+        {
+            float t = (n.Pos.X - minX) / (float)span;
+            if (t < 0.33f) vision.Add(n.Id);
+            else if (t < 0.66f) audio.Add(n.Id);
+            else body.Add(n.Id);
+        }
+
+        _groups[0] = vision.ToArray();
+        _groups[1] = audio.ToArray();
+        _groups[2] = body.ToArray();
+        _groups[3] = Array.Empty<int>();
+    }
+
+    // ------------------------ RNG helpers ------------------------
+
+    private int NextInt(int minInclusive, int maxExclusive)
+    {
+        uint u = _rng.NextU();
+        uint span = (uint)System.Math.Max(1, maxExclusive - minInclusive);
+        return (int)(minInclusive + (u % span));
+    }
+
+    private float NextFloat01()
+    {
+        uint u = _rng.NextU();
+        return (u & 0x00FFFFFF) / 16777215f;
+    }
 
     private static float Clamp01(float v) => v < 0f ? 0f : (v > 1f ? 1f : v);
 
-    private sealed class ArchivePayload
+    // ------------------------ Mapping ------------------------
+
+    private static LatticeSnapshotDto Map(LatticeSnapshot snap)
     {
-        public long Step { get; set; }
-        public ModulatorsRequest? Mods { get; set; }
-        public ThalamusState? Thal { get; set; }
-        public List<NodeState>? Nodes { get; set; }
-        public List<EdgeState>? Edges { get; set; }
+        return new LatticeSnapshotDto
+        {
+            StepIndex = snap.StepIndex,
+            Nodes = snap.Nodes.Select(n => new NodeSnapDto
+            {
+                Id = n.Id,
+                Pos = new Pos3Dto { X = n.Pos.X, Y = n.Pos.Y, Z = n.Pos.Z },
+                V = n.V,
+                Rate = n.Rate,
+                Spiked = n.Spiked
+            }).ToList(),
+            Synapses = snap.Synapses.Select(e => new EdgeSnapDto
+            {
+                Id = e.Id,
+                Pre = e.Pre,
+                Post = e.Post,
+                W = e.W,
+                Kind = e.Kind
+            }).ToList()
+        };
     }
 
-    private sealed class ThalamusState
+    private readonly record struct ThalamusGates(float Vision, float Audio, float Body, float Internal)
     {
-        public float VisionGate { get; set; } = 1f;
-        public float AudioGate { get; set; } = 1f;
-        public float BodyGate { get; set; } = 1f;
-        public float InternalGate { get; set; } = 0.35f;
-    }
+        public static ThalamusGates Default => new(1f, 1f, 1f, 0.35f);
 
-    private sealed class NodeState
-    {
-        public int Id { get; set; }
-        public int X { get; set; }
-        public int Y { get; set; }
-        public int Z { get; set; }
-        public float V { get; set; }
-        public float Rate { get; set; }
-        public bool Spiked { get; set; }
-    }
-
-    private sealed class EdgeState
-    {
-        public long Id { get; set; }
-        public int Pre { get; set; }
-        public int Post { get; set; }
-        public float W { get; set; }
-        public int Kind { get; set; }
+        public float ForGroup(int group) => group switch
+        {
+            0 => Vision,
+            1 => Audio,
+            2 => Body,
+            3 => Internal,
+            _ => 1f
+        };
     }
 }

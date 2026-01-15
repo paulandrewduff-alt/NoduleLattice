@@ -1,4 +1,22 @@
-﻿using NoduleLattice.Abstractions.Archive;
+﻿// ============================================================================
+// FILE: NoduleLattice/Core/Runtime/NoduleLatticeEngine.cs
+// PURPOSE:
+//   Canon engine with:
+//     - Parallel stepping path (enableParallel=true)
+//     - StepAsync for API/background runner usage
+//     - Preserves existing archive Save/Load format (NO ArchiveEngine dependency)
+// NOTES:
+//   StructuralTick stays single-threaded.
+//   ReplayBuffer pushes are kept sequential for safety.
+// ============================================================================
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using NoduleLattice.Abstractions.Archive;
 using NoduleLattice.Abstractions.Math;
 using NoduleLattice.Abstractions.Modulation;
 using NoduleLattice.Abstractions.Nodes;
@@ -37,12 +55,17 @@ public sealed class NoduleLatticeEngine : IArchiveStore
 
     private readonly int _structuralPeriodSteps;
 
-    // Entry 011: probation output capture for correlation contribution
+    // probation output capture
     private readonly Dictionary<long, float> _probationOutputs = new();
 
-    // Entry 011: optional sleep replay
+    // sleep replay
     private readonly SleepReplayConfig _sleep;
     private readonly ReplayBuffer _replay;
+
+    // Parallel controls
+    private readonly bool _enableParallel;
+    private readonly int _maxDegree;
+    private readonly int _synapseChunkSize;
 
     public NoduleLatticeEngine(
         IResettableTimebase time,
@@ -53,7 +76,10 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         UtilityProbe probe,
         int structuralPeriodSteps = 128,
         int maxDelaySteps = 4,
-        SleepReplayConfig? sleep = null)
+        SleepReplayConfig? sleep = null,
+        bool enableParallel = true,
+        int? maxDegreeOfParallelism = null,
+        int synapseChunkSize = 4096)
     {
         _time = time;
         _field = field;
@@ -62,12 +88,16 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         _demand = demand;
         _probe = probe;
 
-        _structuralPeriodSteps = System.Math.Max(1, structuralPeriodSteps);
-        _maxDelay = System.Math.Max(0, maxDelaySteps);
+        _structuralPeriodSteps = Math.Max(1, structuralPeriodSteps);
+        _maxDelay = Math.Max(0, maxDelaySteps);
 
         _sleep = sleep ?? new SleepReplayConfig();
         _replay = new ReplayBuffer(_sleep.HistorySteps);
         _replay.Reset(Array.Empty<NoduleId>());
+
+        _enableParallel = enableParallel;
+        _maxDegree = Math.Max(1, maxDegreeOfParallelism ?? Environment.ProcessorCount);
+        _synapseChunkSize = Math.Max(256, synapseChunkSize);
     }
 
     public long StepIndex => _time.StepIndex;
@@ -86,7 +116,6 @@ public sealed class NoduleLatticeEngine : IArchiveStore
 
         _spatial.Add(node);
 
-        // Ensure replay buffer sees current node set
         _replay.Reset(_nodes.Keys);
     }
 
@@ -100,8 +129,8 @@ public sealed class NoduleLatticeEngine : IArchiveStore
     public bool RemoveSynapse(SynapseId id)
     {
         if (!_synapses.TryGetValue(id, out var syn)) return false;
-        _synapses.Remove(id);
 
+        _synapses.Remove(id);
         _outgoing[syn.Pre].Remove(syn);
         _incoming[syn.Post].Remove(syn);
         return true;
@@ -132,9 +161,28 @@ public sealed class NoduleLatticeEngine : IArchiveStore
 
     public void Step(int steps = 1)
     {
-        steps = System.Math.Max(1, steps);
+        steps = Math.Max(1, steps);
+
         for (int i = 0; i < steps; i++)
-            StepOne();
+        {
+            if (_enableParallel) StepOneParallel();
+            else StepOneSequential();
+        }
+    }
+
+    public Task StepAsync(int steps, CancellationToken ct = default)
+    {
+        steps = Math.Max(1, steps);
+
+        return Task.Run(() =>
+        {
+            for (int i = 0; i < steps; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (_enableParallel) StepOneParallel();
+                else StepOneSequential();
+            }
+        }, ct);
     }
 
     public void SleepReplay()
@@ -158,36 +206,35 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         {
             foreach (var id in _nodes.Keys)
             {
-                float r = _replay.GetReplayRate(id, i % System.Math.Max(1, _sleep.HistorySteps));
+                float r = _replay.GetReplayRate(id, i % Math.Max(1, _sleep.HistorySteps));
                 if (r <= 0.0001f) continue;
-
                 InjectInput(id, r * _sleep.ReplayGain);
             }
 
-            StepOne();
+            if (_enableParallel) StepOneParallel();
+            else StepOneSequential();
         }
     }
 
-    private void StepOne()
+    // ------------------------ Sequential (kept) ------------------------
+
+    private void StepOneSequential()
     {
-        // Phase 0: reset
-        foreach (var kvp in _nodes)
+        foreach (var n in _nodes.Values)
         {
-            var n = kvp.Value;
             var act = n.Activity;
             act.ResetStepFlags();
             n.Activity = act;
+
             _acc[n.Id].Reset();
         }
 
-        // Sample modulators
         var perNodeMod = new Dictionary<NoduleId, ModulatorVector>(_nodes.Count);
         foreach (var n in _nodes.Values)
             perNodeMod[n.Id] = _field.Sample(n.Position);
 
         _probationOutputs.Clear();
 
-        // Phase 1
         foreach (var syn in _synapses.Values)
         {
             var preAct = GetDelayedActivity(syn.Pre, syn.DelaySteps);
@@ -195,7 +242,6 @@ public sealed class NoduleLatticeEngine : IArchiveStore
 
             float outSig = syn.ComputeOutput(preAct, m);
 
-            // capture probation synapse outputs (Entry 011)
             if (_topology.TryGetProbation(syn.Id, out _))
                 _probationOutputs[syn.Id.Value] = outSig;
 
@@ -204,7 +250,6 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             else acc.InhSum += -outSig;
         }
 
-        // Phase 4
         foreach (var n in _nodes.Values)
         {
             var m = n.Membrane;
@@ -212,7 +257,6 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             n.Membrane = m;
         }
 
-        // Phase 5
         foreach (var n in _nodes.Values)
         {
             var m = n.Membrane;
@@ -222,7 +266,6 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             n.Activity = a;
         }
 
-        // Phase 3
         foreach (var syn in _synapses.Values)
         {
             var preAct = GetDelayedActivity(syn.Pre, syn.DelaySteps);
@@ -230,14 +273,12 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             syn.AdvanceFastState(preAct, postAct);
         }
 
-        // Phase 6
         foreach (var syn in _synapses.Values)
         {
             var m = perNodeMod[syn.Post];
             syn.Consolidate(m);
         }
 
-        // Phase 7
         foreach (var syn in _synapses.Values)
         {
             var m = perNodeMod[syn.Post];
@@ -249,7 +290,6 @@ public sealed class NoduleLatticeEngine : IArchiveStore
                 _topology.EnqueueGrowthRequest(req.Value);
         }
 
-        // Utility observation
         var all = _synapses.Values.ToList();
         var view = new TopologyView(_time.StepIndex, _nodes, _incoming, _outgoing, all, _spatial);
 
@@ -262,10 +302,215 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             PushActivityDelay(n.Id, n.Activity);
             _replay.Push(n.Id, n.Activity.Rate);
         }
+
         _replay.AdvanceStep();
 
         if ((_time.StepIndex % _structuralPeriodSteps) == 0)
             StructuralTick();
+    }
+
+    // ------------------------ Parallel ------------------------
+
+    private void StepOneParallel()
+    {
+        var nodeArr = _nodes.Values.ToArray();
+        var synArr = _synapses.Values.OrderBy(s => s.Id.Value).ToArray();
+
+        if (nodeArr.Length == 0)
+        {
+            _time.Advance();
+            return;
+        }
+
+        int maxNodeId = 0;
+        for (int i = 0; i < nodeArr.Length; i++)
+            maxNodeId = Math.Max(maxNodeId, nodeArr[i].Id.Value);
+
+        // Phase 0 reset
+        Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
+        {
+            var n = nodeArr[i];
+            var act = n.Activity;
+            act.ResetStepFlags();
+            n.Activity = act;
+            _acc[n.Id].Reset();
+        });
+
+        // Per-node modulators
+        var perNodeModArr = new ModulatorVector[maxNodeId + 1];
+        Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
+        {
+            var n = nodeArr[i];
+            perNodeModArr[n.Id.Value] = _field.Sample(n.Position);
+        });
+
+        _probationOutputs.Clear();
+
+        // Synapse chunks
+        var ranges = BuildRanges(synArr.Length, _synapseChunkSize);
+        var localExc = new float[ranges.Length][];
+        var localInh = new float[ranges.Length][];
+        var localProb = new Dictionary<long, float>[ranges.Length];
+
+        // Phase 1 synapse outputs
+        Parallel.For(0, ranges.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, r =>
+        {
+            var (start, end) = ranges[r];
+
+            var exc = new float[maxNodeId + 1];
+            var inh = new float[maxNodeId + 1];
+            var prob = new Dictionary<long, float>();
+
+            for (int i = start; i < end; i++)
+            {
+                var syn = synArr[i];
+
+                var preAct = GetDelayedActivity(syn.Pre, syn.DelaySteps);
+                var m = perNodeModArr[syn.Post.Value];
+
+                float outSig = syn.ComputeOutput(preAct, m);
+
+                if (_topology.TryGetProbation(syn.Id, out _))
+                    prob[syn.Id.Value] = outSig;
+
+                int post = syn.Post.Value;
+                if (outSig >= 0) exc[post] += outSig;
+                else inh[post] += -outSig;
+            }
+
+            localExc[r] = exc;
+            localInh[r] = inh;
+            localProb[r] = prob;
+        });
+
+        // Deterministic-ish reduction
+        for (int post = 1; post <= maxNodeId; post++)
+        {
+            float ex = 0f, ih = 0f;
+            for (int r = 0; r < ranges.Length; r++)
+            {
+                ex += localExc[r][post];
+                ih += localInh[r][post];
+            }
+
+            if (ex != 0f || ih != 0f)
+            {
+                var id = new NoduleId(post);
+                if (_acc.TryGetValue(id, out var a))
+                {
+                    a.ExcSum += ex;
+                    a.InhSum += ih;
+                }
+            }
+        }
+
+        for (int r = 0; r < ranges.Length; r++)
+            foreach (var kv in localProb[r])
+                _probationOutputs[kv.Key] = kv.Value;
+
+        // Phase 4 integrate membranes
+        Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
+        {
+            var n = nodeArr[i];
+            var m = n.Membrane;
+            _membrane.Integrate(ref m, _acc[n.Id]);
+            n.Membrane = m;
+        });
+
+        // Phase 5 emit spikes
+        long stepIdx = _time.StepIndex;
+        Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
+        {
+            var n = nodeArr[i];
+            var m = n.Membrane;
+            var a = n.Activity;
+            _membrane.Emit(stepIdx, ref m, ref a);
+            n.Membrane = m;
+            n.Activity = a;
+        });
+
+        // Phase 3 synapse fast state
+        Parallel.For(0, ranges.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, r =>
+        {
+            var (start, end) = ranges[r];
+            for (int i = start; i < end; i++)
+            {
+                var syn = synArr[i];
+                var preAct = GetDelayedActivity(syn.Pre, syn.DelaySteps);
+                var postAct = _nodes[syn.Post].Activity;
+                syn.AdvanceFastState(preAct, postAct);
+            }
+        });
+
+        // Phase 6 consolidate
+        Parallel.For(0, ranges.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, r =>
+        {
+            var (start, end) = ranges[r];
+            for (int i = start; i < end; i++)
+            {
+                var syn = synArr[i];
+                var m = perNodeModArr[syn.Post.Value];
+                syn.Consolidate(m);
+            }
+        });
+
+        // Phase 7 slow hooks + growth requests
+        Parallel.For(0, ranges.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, r =>
+        {
+            var (start, end) = ranges[r];
+            for (int i = start; i < end; i++)
+            {
+                var syn = synArr[i];
+                var m = perNodeModArr[syn.Post.Value];
+                var demand = _demand.Estimate(m);
+                syn.SlowHooks(m, demand);
+
+                var req = syn.ConsiderGrowthRequest(m);
+                if (req.HasValue)
+                    _topology.EnqueueGrowthRequest(req.Value);
+            }
+        });
+
+        // Observe + advance
+        var all = synArr.ToList();
+        var view = new TopologyView(_time.StepIndex, _nodes, _incoming, _outgoing, all, _spatial);
+        _probe.ObserveStep(view, _topology, id => perNodeModArr[id.Value], _probationOutputs);
+
+        _time.Advance();
+
+        // Delay buffers can be parallel, replay push sequential
+        Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
+        {
+            var n = nodeArr[i];
+            PushActivityDelay(n.Id, n.Activity);
+        });
+
+        foreach (var n in nodeArr)
+            _replay.Push(n.Id, n.Activity.Rate);
+
+        _replay.AdvanceStep();
+
+        if ((_time.StepIndex % _structuralPeriodSteps) == 0)
+            StructuralTick();
+    }
+
+    private static (int start, int end)[] BuildRanges(int length, int chunkSize)
+    {
+        if (length <= 0) return Array.Empty<(int, int)>();
+
+        int chunks = (length + chunkSize - 1) / chunkSize;
+        var ranges = new (int start, int end)[chunks];
+
+        int idx = 0;
+        for (int c = 0; c < chunks; c++)
+        {
+            int start = idx;
+            int end = Math.Min(length, start + chunkSize);
+            ranges[c] = (start, end);
+            idx = end;
+        }
+
+        return ranges;
     }
 
     private void StructuralTick()
@@ -291,7 +536,7 @@ public sealed class NoduleLatticeEngine : IArchiveStore
     private NodeActivity GetDelayedActivity(NoduleId id, int delay)
     {
         if (_maxDelay == 0) return _nodes[id].Activity;
-        delay = System.Math.Clamp(delay, 0, _maxDelay);
+        delay = Math.Clamp(delay, 0, _maxDelay);
         return _activityDelay[id][delay];
     }
 

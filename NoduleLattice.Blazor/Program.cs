@@ -1,28 +1,37 @@
+// ============================================================================
+// FILE: NoduleLattice.Blazor/Program.cs
+// PURPOSE:
+//   Increase HttpClient timeout used by LatticeApiClient so long-running
+//   lattice steps do not fail at 100 seconds.
+// ============================================================================
+
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Web;
+using NoduleLattice.Blazor.Components;
 using NoduleLattice.Blazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// .NET 9 Blazor Web App hosting
-builder.Services.AddRazorComponents()
+// Razor Components / Blazor
+builder.Services
+    .AddRazorComponents()
     .AddInteractiveServerComponents();
 
-// IMPORTANT: show the real circuit exception in the browser
-builder.Services.AddServerSideBlazor().AddCircuitOptions(o =>
-{
-    o.DetailedErrors = true;
-});
-
-// Snapshot-only API client
+// Typed API client with a longer timeout
 builder.Services.AddHttpClient<LatticeApiClient>(client =>
 {
-    client.BaseAddress = new Uri(builder.Configuration["LatticeApi:BaseUrl"] ?? "http://localhost:7045/");
+    var baseUrl = builder.Configuration["LatticeApi:BaseUrl"] ?? "https://localhost:7045/";
+    client.BaseAddress = new Uri(baseUrl);
+
+    // IMPORTANT: default is 100 seconds; cortex stepping can exceed that.
+    client.Timeout = TimeSpan.FromMinutes(10);
 });
 
 var app = builder.Build();
 
 if (!app.Environment.IsDevelopment())
 {
-    app.UseExceptionHandler("/Error");
+    app.UseExceptionHandler("/Error", createScopeForErrors: true);
     app.UseHsts();
 }
 
@@ -30,7 +39,7 @@ app.UseHttpsRedirection();
 app.UseStaticFiles();
 app.UseAntiforgery();
 
-app.MapRazorComponents<NoduleLattice.Blazor.Components.App>()
+app.MapRazorComponents<App>()
    .AddInteractiveServerRenderMode();
 
 app.Run();

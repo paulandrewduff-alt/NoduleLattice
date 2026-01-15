@@ -48,6 +48,12 @@ public sealed class ThalamusGatesRequest
     public float InternalGate { get; init; } = 0.35f;
 }
 
+public sealed class RunStartRequest
+{
+    public int Hz { get; init; } = 20;
+    public int StepsPerTick { get; init; } = 2;
+}
+
 public sealed class LatticeSnapshotDto
 {
     public long StepIndex { get; set; }
