@@ -1,8 +1,15 @@
-﻿using Microsoft.AspNetCore.Mvc;
+﻿// ============================================================================
+// FILE: NoduleLattice.Api/Controllers/LatticeController.cs
+// PURPOSE:
+//   - All request bodies use NoduleLattice.Api.Dtos (avoid ambiguity)
+//   - Snapshot supports thin mode via query params (non-breaking)
+// ROUTES:
+//   GET  /api/lattice/snapshot?mode=thin&maxEdges=12000&maxLen=7
+//   GET  /api/lattice/snapshot             (full)
+// ============================================================================
+
+using Microsoft.AspNetCore.Mvc;
 using NoduleLattice.Api.Dtos;
-
-
-//using NoduleLattice.Api.Models;
 using NoduleLattice.Api.Services;
 
 namespace NoduleLattice.Api.Controllers;
@@ -12,12 +19,10 @@ namespace NoduleLattice.Api.Controllers;
 public sealed class LatticeController : ControllerBase
 {
     private readonly LatticeHostService _host;
-    private readonly LatticeRunnerService _runner;
 
-    public LatticeController(LatticeHostService host, LatticeRunnerService runner)
+    public LatticeController(LatticeHostService host)
     {
         _host = host;
-        _runner = runner;
     }
 
     [HttpPost("create")]
@@ -31,9 +36,24 @@ public sealed class LatticeController : ControllerBase
         return Ok();
     }
 
+    // Non-breaking: default is full snapshot
+    // Thin snapshot: mode=thin
     [HttpGet("snapshot")]
-    public ActionResult<LatticeSnapshotDto> Snapshot()
-        => Ok(_host.GetSnapshot());
+    public ActionResult<LatticeSnapshotDto> Snapshot(
+        [FromQuery] string? mode = null,
+        [FromQuery] int? maxEdges = null,
+        [FromQuery] float? maxLen = null)
+    {
+        bool thin = string.Equals(mode, "thin", StringComparison.OrdinalIgnoreCase);
+
+        if (!thin)
+            return Ok(_host.GetSnapshot());
+
+        int edges = maxEdges is null ? 12_000 : Math.Clamp(maxEdges.Value, 100, 250_000);
+        float len = maxLen is null ? 7f : Math.Clamp(maxLen.Value, 0.5f, 200f);
+
+        return Ok(_host.GetSnapshotThin(edges, len));
+    }
 
     [HttpPost("inject")]
     public IActionResult Inject([FromBody] InjectRequest req)
@@ -46,6 +66,13 @@ public sealed class LatticeController : ControllerBase
     public IActionResult Modulators([FromBody] ModulatorsRequest req)
     {
         _host.SetModulators(req);
+        return Ok();
+    }
+
+    [HttpPost("sleep-replay")]
+    public IActionResult SleepReplay([FromBody] SleepReplayRequest req)
+    {
+        _host.SleepReplay(req.Run);
         return Ok();
     }
 
@@ -63,13 +90,6 @@ public sealed class LatticeController : ControllerBase
         return Ok();
     }
 
-    [HttpPost("sleep-replay")]
-    public IActionResult SleepReplay([FromBody] SleepReplayRequest req)
-    {
-        _host.SleepReplay(req.Run);
-        return Ok();
-    }
-
     [HttpGet("archive")]
     public ActionResult<ArchiveDto> GetArchive()
         => Ok(_host.SaveArchive());
@@ -84,24 +104,4 @@ public sealed class LatticeController : ControllerBase
     [HttpPost("validate")]
     public IActionResult Validate()
         => Ok(_host.Validate());
-
-    // ---------------- Runner ----------------
-
-    [HttpPost("run/start")]
-    public ActionResult<RunStatusDto> RunStart([FromBody] RunRequest req)
-    {
-        _runner.Start(req.TargetHz, req.StepsPerTick);
-        return Ok(_runner.Status());
-    }
-
-    [HttpPost("run/stop")]
-    public ActionResult<RunStatusDto> RunStop()
-    {
-        _runner.Stop();
-        return Ok(_runner.Status());
-    }
-
-    [HttpGet("run/status")]
-    public ActionResult<RunStatusDto> RunStatus()
-        => Ok(_runner.Status());
 }

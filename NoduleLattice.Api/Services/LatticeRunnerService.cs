@@ -1,18 +1,19 @@
-﻿using System.Diagnostics;
-using NoduleLattice.Api.Dtos;
+﻿using NoduleLattice.Api.Dtos;
 
 namespace NoduleLattice.Api.Services;
 
-public sealed class LatticeRunnerService : BackgroundService
+public sealed class LatticeRunnerService : IAsyncDisposable
 {
     private readonly LatticeHostService _host;
 
     private readonly object _gate = new();
 
+    private CancellationTokenSource? _cts;
+    private Task? _loop;
+
     private bool _running;
     private int _targetHz = 30;
     private int _stepsPerTick = 2;
-
     private long _ticks;
     private string? _lastError;
 
@@ -21,89 +22,113 @@ public sealed class LatticeRunnerService : BackgroundService
         _host = host;
     }
 
-    public void Start(int targetHz, int stepsPerTick)
+    public RunStatusDto Start(RunRequest req)
     {
         lock (_gate)
         {
-            _targetHz = Math.Clamp(targetHz, 1, 240);
-            _stepsPerTick = Math.Clamp(stepsPerTick, 1, 4096);
+            _targetHz = Math.Clamp(req.TargetHz, 1, 240);
+            _stepsPerTick = Math.Clamp(req.StepsPerTick, 1, 4096);
+
+            if (_running)
+                return StatusUnsafe();
+
             _running = true;
             _lastError = null;
+
+            _cts?.Cancel();
+            _cts?.Dispose();
+            _cts = new CancellationTokenSource();
+
+            _loop = Task.Run(() => Loop(_cts.Token), _cts.Token);
+
+            return StatusUnsafe();
         }
     }
 
-    public void Stop()
+    public RunStatusDto Stop()
     {
         lock (_gate)
         {
+            if (!_running)
+                return StatusUnsafe();
+
             _running = false;
+
+            _cts?.Cancel();
+            return StatusUnsafe();
         }
     }
 
     public RunStatusDto Status()
     {
-        lock (_gate)
+        lock (_gate) return StatusUnsafe();
+    }
+
+    private RunStatusDto StatusUnsafe()
+        => new()
         {
-            return new RunStatusDto
+            Running = _running,
+            TargetHz = _targetHz,
+            StepsPerTick = _stepsPerTick,
+            Ticks = _ticks,
+            LastError = _lastError
+        };
+
+    private async Task Loop(CancellationToken ct)
+    {
+        try
+        {
+            var period = TimeSpan.FromMilliseconds(1000.0 / _targetHz);
+            using var timer = new PeriodicTimer(period);
+
+            while (!ct.IsCancellationRequested)
             {
-                Running = _running,
-                TargetHz = _targetHz,
-                StepsPerTick = _stepsPerTick,
-                Ticks = _ticks,
-                LastError = _lastError
-            };
+                var ok = await timer.WaitForNextTickAsync(ct);
+                if (!ok) break;
+
+                // Step the host (host locks internally)
+                _host.Step(_stepsPerTick);
+
+                lock (_gate) _ticks++;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // expected on stop
+        }
+        catch (Exception ex)
+        {
+            lock (_gate)
+            {
+                _lastError = ex.Message;
+                _running = false;
+            }
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                _running = false;
+            }
         }
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public async ValueTask DisposeAsync()
     {
-        var sw = new Stopwatch();
+        CancellationTokenSource? cts;
+        Task? loop;
 
-        while (!stoppingToken.IsCancellationRequested)
+        lock (_gate)
         {
-            bool run;
-            int hz;
-            int steps;
-
-            lock (_gate)
-            {
-                run = _running;
-                hz = _targetHz;
-                steps = _stepsPerTick;
-            }
-
-            if (!run)
-            {
-                await Task.Delay(100, stoppingToken);
-                continue;
-            }
-
-            sw.Restart();
-
-            try
-            {
-                // Host handles internal locking and uses parallel engine inside.
-                _host.Step(steps);
-
-                lock (_gate) { _ticks++; }
-            }
-            catch (Exception ex)
-            {
-                lock (_gate)
-                {
-                    _running = false;
-                    _lastError = ex.Message;
-                }
-            }
-
-            var elapsedMs = sw.Elapsed.TotalMilliseconds;
-            var targetFrameMs = 1000.0 / Math.Max(1, hz);
-            var delayMs = (int)Math.Max(0, targetFrameMs - elapsedMs);
-
-            if (delayMs > 0)
-                await Task.Delay(delayMs, stoppingToken);
-            else
-                await Task.Yield();
+            cts = _cts;
+            loop = _loop;
+            _cts = null;
+            _loop = null;
+            _running = false;
         }
+
+        try { cts?.Cancel(); } catch { }
+        try { if (loop is not null) await loop; } catch { }
+        try { cts?.Dispose(); } catch { }
     }
 }

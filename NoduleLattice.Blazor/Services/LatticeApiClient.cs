@@ -1,9 +1,8 @@
 ﻿// ============================================================================
 // FILE: NoduleLattice.Blazor/Services/LatticeApiClient.cs
 // PURPOSE:
-//   Single, canonical client (no duplicates).
-//   - Keeps Home.razor expected surface
-//   - Adds runner endpoints
+//   - Adds Thin Snapshot support (mode=thin)
+//   - Keeps existing surface area used by Home.razor
 // ============================================================================
 
 using System.Net.Http.Json;
@@ -18,12 +17,19 @@ public sealed class LatticeApiClient
     public string? LastError { get; private set; }
     public string LastResolvedSnapshotPath { get; }
 
+    // Thin snapshot controls (UI can bind these)
+    public bool UseThinSnapshot { get; set; } = true;
+    public int ThinMaxEdges { get; set; } = 12_000;
+    public float ThinMaxLen { get; set; } = 7f;
+
     public LatticeApiClient(HttpClient http)
     {
         _http = http;
 
         var baseUri = _http.BaseAddress?.ToString() ?? string.Empty;
         if (!baseUri.EndsWith("/")) baseUri += "/";
+
+        // Default "resolved path" points to the thin endpoint we call in GetSnapshot()
         LastResolvedSnapshotPath = baseUri + "api/lattice/snapshot";
     }
 
@@ -32,7 +38,16 @@ public sealed class LatticeApiClient
         try
         {
             LastError = null;
-            var snap = await _http.GetFromJsonAsync<LatticeSnapshotDto>("api/lattice/snapshot", ct);
+
+            string path = "api/lattice/snapshot";
+            if (UseThinSnapshot)
+            {
+                int edges = Math.Clamp(ThinMaxEdges, 100, 250_000);
+                float len = Math.Clamp(ThinMaxLen, 0.5f, 200f);
+                path += $"?mode=thin&maxEdges={edges}&maxLen={len}";
+            }
+
+            var snap = await _http.GetFromJsonAsync<LatticeSnapshotDto>(path, ct);
             return snap ?? new LatticeSnapshotDto();
         }
         catch (Exception ex)
@@ -56,7 +71,6 @@ public sealed class LatticeApiClient
         }
     }
 
-    // UI view models -> request models
     public Task SetModulators(UiModulators ui, CancellationToken ct = default)
         => SetModulators(new ModulatorsRequestModel
         {

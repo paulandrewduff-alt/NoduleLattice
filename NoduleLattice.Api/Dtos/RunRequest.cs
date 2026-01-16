@@ -2,6 +2,6 @@
 
 public sealed class RunRequest
 {
-    public int TargetHz { get; set; } = 30;
-    public int StepsPerTick { get; set; } = 2;
+    public int TargetHz { get; init; } = 30;
+    public int StepsPerTick { get; init; } = 2;
 }

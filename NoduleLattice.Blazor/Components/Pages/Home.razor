@@ -18,21 +18,48 @@
         </div>
     </header>
 
-    @if (!string.IsNullOrWhiteSpace(_apiStatus) || !string.IsNullOrWhiteSpace(_apiError))
-    {
-        <section class="card">
-            <header class="card-h">
-                <div>
-                    <div class="h-title">API</div>
-                    <div class="h-sub">@_apiStatus</div>
-                </div>
-                @if (!string.IsNullOrWhiteSpace(_apiError))
-                {
-                    <div class="err">@_apiError</div>
-                }
-            </header>
-        </section>
-    }
+    <section class="card">
+        <header class="card-h">
+            <div>
+                <div class="h-title">Snapshot Mode</div>
+                <div class="h-sub">Thin mode keeps UI real-time as synapses scale up</div>
+            </div>
+            <div class="pill mono">@(_thinSnapshots ? "THIN" : "FULL")</div>
+        </header>
+
+        <div class="form">
+            <label class="lbl">Thin snapshots</label>
+            <div class="row">
+                <input type="checkbox" @bind="_thinSnapshots" />
+                <span class="muted">Use /snapshot?mode=thin</span>
+            </div>
+
+            <label class="lbl">Max edges</label>
+            <input class="input" type="number" min="100" max="250000" @bind="_thinMaxEdges" />
+
+            <label class="lbl">Max edge len</label>
+            <input class="input" type="number" step="0.5" min="0.5" max="200" @bind="_thinMaxLen" />
+
+            <label class="lbl">Poll ms (UI)</label>
+            <input class="input" type="number" min="16" max="2000" @bind="_pollMs" />
+
+            <label class="lbl">Auto-poll</label>
+            <div class="row">
+                <input type="checkbox" @bind="_autoPoll" />
+                <span class="muted">Update snapshot on timer</span>
+            </div>
+        </div>
+
+        <div class="row actions">
+            <button class="btn" @onclick="ApplySnapshotMode">Apply</button>
+            <button class="btn" @onclick="Refresh">Refresh Now</button>
+        </div>
+
+        @if (!string.IsNullOrWhiteSpace(_apiError))
+        {
+            <div class="err small" style="margin-top:0.5rem;">@_apiError</div>
+        }
+    </section>
 
     <section class="grid">
         <section class="card">
@@ -50,21 +77,11 @@
 
                 <label class="lbl">Steps / Tick</label>
                 <input class="input" type="number" min="1" max="4096" @bind="_runStepsPerTick" />
-
-                <label class="lbl">Poll ms (UI)</label>
-                <input class="input" type="number" min="16" max="2000" @bind="_pollMs" />
-
-                <label class="lbl">Auto-poll</label>
-                <div class="row">
-                    <input type="checkbox" @bind="_autoPoll" />
-                    <span class="muted">Update snapshot on timer</span>
-                </div>
             </div>
 
             <div class="row actions">
                 <button class="btn" @onclick="StartRunner">Start</button>
                 <button class="btn" @onclick="StopRunner">Stop</button>
-                <button class="btn" @onclick="Refresh">Refresh Now</button>
             </div>
 
             @if (_runStatus is not null)
@@ -83,7 +100,7 @@
             <header class="card-h">
                 <div>
                     <div class="h-title">Manual</div>
-                    <div class="h-sub">One-shot stepping (always works, even if runner is stopped)</div>
+                    <div class="h-sub">One-shot stepping (works even if runner is stopped)</div>
                 </div>
                 <div class="pill mono">step @_stepIndex</div>
             </header>
@@ -178,7 +195,6 @@
     private long _stepIndex;
     private LatticeSnapshotDto? _snapshot;
 
-    private string _apiStatus = "";
     private string _apiError = "";
 
     private RunStatusDto? _runStatus;
@@ -194,17 +210,29 @@
 
     private NetworkViewOptions _view = new();
 
+    // Thin snapshot UI
+    private bool _thinSnapshots = true;
+    private int _thinMaxEdges = 12_000;
+    private float _thinMaxLen = 7f;
+
     protected override async Task OnInitializedAsync()
     {
+        ApplySnapshotMode();
         await Refresh();
 
         if (_autoPoll)
             StartPolling();
     }
 
+    private void ApplySnapshotMode()
+    {
+        Api.UseThinSnapshot = _thinSnapshots;
+        Api.ThinMaxEdges = _thinMaxEdges;
+        Api.ThinMaxLen = _thinMaxLen;
+    }
+
     private async Task Refresh()
     {
-        _apiStatus = "Snapshot endpoint: " + Api.LastResolvedSnapshotPath;
         _apiError = string.Empty;
 
         _snapshot = await Api.GetSnapshot();
@@ -312,7 +340,7 @@
 
         if (_pollTask is not null)
         {
-            try { await _pollTask; } catch { /* ignore */ }
+            try { await _pollTask; } catch { }
         }
 
         _pollCts?.Dispose();
@@ -404,7 +432,6 @@
     .err {
         color: #ffb3b3;
         font-weight: 600;
-        text-align: right;
     }
 
     .muted {

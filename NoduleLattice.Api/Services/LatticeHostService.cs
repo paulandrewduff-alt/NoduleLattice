@@ -1,18 +1,13 @@
 ﻿// ============================================================================
 // FILE: NoduleLattice.Api/Services/LatticeHostService.cs
 // PURPOSE:
-//   Create() builds a cortical slab and seeds cortex-like connectivity:
-//
-//   - Within-layer local connectivity (horizontal fibres)
-//   - Columnar vertical connectivity (x,y constant; z±1)
-//   - Feed-forward laminar connectivity (z -> z+1, small XY radius)
-//
-//   NOTE:
-//   Core engine keeps Int3 positions. “Jitter” is implemented by choosing edges
-//   that preserve columns/laminae; the renderer will still show a clean sheet.
-//   If you later want true jittered positions, we can extend snapshot DTOs to
-//   include float positions without touching core state.
+//   - Owns single in-proc engine instance
+//   - Builds cortical slab + cortex-like wiring on Create()
+//   - Provides FULL snapshot and THIN snapshot (edge-capped + length-capped)
+// NOTES:
+//   Thin snapshot keeps *all nodes* but reduces edges for real-time UI.
 // ============================================================================
+
 using System.Collections.Concurrent;
 using NoduleLattice.Abstractions.Math;
 using NoduleLattice.Abstractions.Modulation;
@@ -54,7 +49,7 @@ public sealed class LatticeHostService
 
     private readonly ConcurrentDictionary<int, int[]> _groups = new();
 
-    // 1-based id -> position
+    // 1-based id -> position (best-effort; rebuilt on archive load)
     private Int3[] _posById = Array.Empty<Int3>();
 
     public LatticeHostService()
@@ -132,10 +127,9 @@ public sealed class LatticeHostService
                 maxOutPerNode: System.Math.Max(1, req.MaxOutPerNode),
                 maxDelaySteps: System.Math.Max(1, req.MaxDelaySteps));
 
-            // Keep your existing “channel bands” grouping (works fine with a slab)
             BuildDefaultGroups(sx, sy, sz);
 
-            return Map(_engine.GetSnapshot());
+            return Map(_engine.GetSnapshot(), edgesOverride: null);
         }
     }
 
@@ -151,7 +145,58 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            return Map(_engine.GetSnapshot());
+            return Map(_engine.GetSnapshot(), edgesOverride: null);
+        }
+    }
+
+    // Thin snapshot: cap edges and drop long edges to keep UI real-time.
+    // - maxEdges: absolute cap
+    // - maxLen: euclidean in *grid* coords (unscaled). (UI does its own scaling.)
+    public LatticeSnapshotDto GetSnapshotThin(int maxEdges, float maxLen)
+    {
+        lock (_gate)
+        {
+            var snap = _engine.GetSnapshot();
+
+            // Ensure _posById is valid after archive loads (or any future rebuild)
+            EnsurePosIndexFromSnapshot(snap);
+
+            var edges = snap.Synapses;
+            if (edges.Count == 0)
+                return Map(snap, edgesOverride: Array.Empty<EdgeSnap>());
+
+            float maxLenSq = maxLen * maxLen;
+
+            // 1) Filter by length
+            List<EdgeSnap> filtered = new(edges.Count);
+            for (int i = 0; i < edges.Count; i++)
+            {
+                var e = edges[i];
+                if (!TryGetPos(e.Pre, out var a)) continue;
+                if (!TryGetPos(e.Post, out var b)) continue;
+
+                int dx = a.X - b.X;
+                int dy = a.Y - b.Y;
+                int dz = a.Z - b.Z;
+
+                float d2 = (dx * dx) + (dy * dy) + (dz * dz);
+                if (d2 <= maxLenSq)
+                    filtered.Add(e);
+            }
+
+            if (filtered.Count <= maxEdges)
+                return Map(snap, edgesOverride: filtered);
+
+            // 2) Take top by |w|
+            filtered.Sort(static (x, y) =>
+            {
+                float ax = System.MathF.Abs(x.W);
+                float ay = System.MathF.Abs(y.W);
+                return ay.CompareTo(ax);
+            });
+
+            var top = filtered.Take(maxEdges).ToList();
+            return Map(snap, edgesOverride: top);
         }
     }
 
@@ -239,7 +284,10 @@ public sealed class LatticeHostService
             var bytes = Convert.FromBase64String(dto.Base64);
             _engine.Load(bytes);
 
-            RebuildGroupsFromSnapshot(_engine.GetSnapshot());
+            // rebuild groups and pos index
+            var snap = _engine.GetSnapshot();
+            RebuildGroupsFromSnapshot(snap);
+            EnsurePosIndexFromSnapshot(snap);
         }
     }
 
@@ -293,12 +341,9 @@ public sealed class LatticeHostService
         if (totalSynapses <= 0) return;
 
         int nodeCount = sx * sy * sz;
-
-        // out-degree tracking
         var outCount = new int[nodeCount + 1];
 
-        // 1) Columnar vertical links (strongly preserves “cortex” look)
-        // For each node: connect to z+1 and/or z-1 at same (x,y)
+        // 1) Columnar vertical links
         int made = 0;
         for (int pre = 1; pre <= nodeCount && made < totalSynapses; pre++)
         {
@@ -319,7 +364,7 @@ public sealed class LatticeHostService
             }
         }
 
-        // 2) Feed-forward laminar links (z -> z+1) with small XY offsets
+        // 2) Feed-forward laminar links
         for (int pre = 1; pre <= nodeCount && made < totalSynapses; pre++)
         {
             var p = _posById[pre];
@@ -347,7 +392,7 @@ public sealed class LatticeHostService
             }
         }
 
-        // 3) Within-layer local recurrent fibres to fill remaining budget
+        // 3) Within-layer local recurrent fibres
         int attempts = 0;
         int maxAttempts = System.Math.Max(10_000, (totalSynapses - made) * 25);
 
@@ -366,7 +411,7 @@ public sealed class LatticeHostService
 
             int nx = p.X + dx;
             int ny = p.Y + dy;
-            int nz = p.Z; // same layer
+            int nz = p.Z;
 
             if (nx < 0 || nx >= sx) continue;
             if (ny < 0 || ny >= sy) continue;
@@ -385,9 +430,7 @@ public sealed class LatticeHostService
 
         var kind = (NextFloat01() < 0.80f) ? SynapseKind.Excitatory : SynapseKind.Inhibitory;
 
-        // Slightly weaker weights by default in cortex to avoid spaghetti dominance
         float w = 0.02f + NextFloat01() * 0.16f;
-
         int delay = NextInt(0, System.Math.Max(1, maxDelaySteps));
 
         var syn = new Synapse2(
@@ -463,6 +506,41 @@ public sealed class LatticeHostService
         _groups[3] = Array.Empty<int>();
     }
 
+    // ------------------------ position index (thin snapshot helpers) ------------------------
+
+    private void EnsurePosIndexFromSnapshot(LatticeSnapshot snap)
+    {
+        int maxId = 0;
+        for (int i = 0; i < snap.Nodes.Count; i++)
+            maxId = System.Math.Max(maxId, snap.Nodes[i].Id);
+
+        if (maxId <= 0) { _posById = Array.Empty<Int3>(); return; }
+        if (_posById.Length == maxId + 1)
+            return;
+
+        var arr = new Int3[maxId + 1];
+        for (int i = 0; i < snap.Nodes.Count; i++)
+        {
+            var n = snap.Nodes[i];
+            if (n.Id >= 0 && n.Id < arr.Length)
+                arr[n.Id] = n.Pos;
+        }
+
+        _posById = arr;
+    }
+
+    private bool TryGetPos(int id, out Int3 pos)
+    {
+        if (id <= 0 || id >= _posById.Length)
+        {
+            pos = default;
+            return false;
+        }
+
+        pos = _posById[id];
+        return true;
+    }
+
     // ------------------------ RNG helpers ------------------------
 
     private int NextInt(int minInclusive, int maxExclusive)
@@ -482,8 +560,10 @@ public sealed class LatticeHostService
 
     // ------------------------ Mapping ------------------------
 
-    private static LatticeSnapshotDto Map(LatticeSnapshot snap)
+    private static LatticeSnapshotDto Map(LatticeSnapshot snap, IReadOnlyList<EdgeSnap>? edgesOverride)
     {
+        var edges = edgesOverride ?? snap.Synapses;
+
         return new LatticeSnapshotDto
         {
             StepIndex = snap.StepIndex,
@@ -495,7 +575,7 @@ public sealed class LatticeHostService
                 Rate = n.Rate,
                 Spiked = n.Spiked
             }).ToList(),
-            Synapses = snap.Synapses.Select(e => new EdgeSnapDto
+            Synapses = edges.Select(e => new EdgeSnapDto
             {
                 Id = e.Id,
                 Pre = e.Pre,
