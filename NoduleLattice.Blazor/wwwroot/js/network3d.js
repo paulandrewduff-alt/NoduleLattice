@@ -1,12 +1,10 @@
 ﻿// ============================================================================
 // FILE: NoduleLattice.Blazor/wwwroot/js/network3d.js
-// PURPOSE:
-//   Cortex-look visual pass:
-//     - XY spacing + Z scaling to make laminar slab obvious
-//     - Optional laminar planes and grid/axes overlays
-//     - Edge thinning: fade + hard cull by length
-//     - Reuse geometries when counts match (faster for real-time)
-//     - Hover: highlight cortical column (same X/Y across layers)
+// PURPOSE (Visual notch #3):
+//   - Replace billboard points with instanced SOMA SPHERES (no more giant quads).
+//   - Strong region base colour + activity overlay (keeps cortex/thalamus/nuclei visible).
+//   - Edge thinning: local-first, long-range de-emphasised, still performance-friendly.
+//   - Correct hover picking for InstancedMesh (true node ids).
 // ============================================================================
 
 function requireThree() {
@@ -15,19 +13,8 @@ function requireThree() {
     return window.THREE;
 }
 
-function clamp(x, lo, hi) {
-    return x < lo ? lo : (x > hi ? hi : x);
-}
-
-function layerTint01(zNorm) {
-    const cool = clamp(1.0 - zNorm, 0.0, 1.0);
-    const warm = clamp(zNorm, 0.0, 1.0);
-    return {
-        r: 0.10 * warm,
-        g: 0.08 * (0.35 + 0.65 * zNorm),
-        b: 0.12 * cool
-    };
-}
+function clamp(x, lo, hi) { return x < lo ? lo : (x > hi ? hi : x); }
+function lerp(a, b, t) { return a + (b - a) * t; }
 
 function normalizeSnapshot(snapshot) {
     return {
@@ -40,27 +27,163 @@ function normalizeSnapshot(snapshot) {
 function normalizeView(view) {
     view = view || {};
     return {
-        spacingXY: view.spacingXY ?? view.SpacingXY ?? 1.35,
-        zScale: view.zScale ?? view.ZScale ?? 1.80,
+        spacingXY: view.spacingXY ?? view.SpacingXY ?? 1.20,
+        zScale: view.zScale ?? view.ZScale ?? 1.70,
 
-        nodeSize: view.nodeSize ?? view.NodeSize ?? 0.26,
-        nodeOpacity: view.nodeOpacity ?? view.NodeOpacity ?? 0.95,
+        nodeSize: view.nodeSize ?? view.NodeSize ?? 0.10, // sphere radius-ish
+        nodeOpacity: view.nodeOpacity ?? view.NodeOpacity ?? 0.92,
 
-        edgeSoftFadeLen: view.edgeSoftFadeLen ?? view.EdgeSoftFadeLen ?? 5.0,
-        edgeHardCullLen: view.edgeHardCullLen ?? view.EdgeHardCullLen ?? 8.0,
-        edgeOpacity: view.edgeOpacity ?? view.EdgeOpacity ?? 0.55,
+        edgeSoftFadeLen: view.edgeSoftFadeLen ?? view.EdgeSoftFadeLen ?? 4.2,
+        edgeHardCullLen: view.edgeHardCullLen ?? view.EdgeHardCullLen ?? 6.2,
+        edgeOpacity: view.edgeOpacity ?? view.EdgeOpacity ?? 0.28,
 
         showGrid: view.showGrid ?? view.ShowGrid ?? true,
         showAxes: view.showAxes ?? view.ShowAxes ?? false,
         showLaminarPlanes: view.showLaminarPlanes ?? view.ShowLaminarPlanes ?? true,
 
         enableFog: view.enableFog ?? view.EnableFog ?? true,
-        fogDensity: view.fogDensity ?? view.FogDensity ?? 0.018,
+        fogDensity: view.fogDensity ?? view.FogDensity ?? 0.020,
 
         hoverPointThreshold: view.hoverPointThreshold ?? view.HoverPointThreshold ?? 0.55,
         columnBoost: view.columnBoost ?? view.ColumnBoost ?? 0.55,
-        hoverBoost: view.hoverBoost ?? view.HoverBoost ?? 0.90
+        hoverBoost: view.hoverBoost ?? view.HoverBoost ?? 0.90,
+
+        enableRegions: view.enableRegions ?? view.EnableRegions ?? true,
+        thalamusRadiusXY: view.thalamusRadiusXY ?? view.ThalamusRadiusXY ?? 0.28,
+        thalamusRadiusZ: view.thalamusRadiusZ ?? view.ThalamusRadiusZ ?? 0.38,
+        nucleiCount: view.nucleiCount ?? view.NucleiCount ?? 6,
+        nucleiRadius: view.nucleiRadius ?? view.NucleiRadius ?? 0.10,
+
+        enableColumnBanding: view.enableColumnBanding ?? view.EnableColumnBanding ?? true,
+        columnBandPeriod: view.columnBandPeriod ?? view.ColumnBandPeriod ?? 2,
+        columnBandStrength: view.columnBandStrength ?? view.ColumnBandStrength ?? 0.18
     };
+}
+
+function computeBounds(nodes) {
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+    for (const n of nodes) {
+        const p = n.pos ?? n.Pos;
+        const x = (p.x ?? p.X);
+        const y = (p.y ?? p.Y);
+        const z = (p.z ?? p.Z);
+
+        if (x < minX) minX = x; if (x > maxX) maxX = x;
+        if (y < minY) minY = y; if (y > maxY) maxY = y;
+        if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+
+    if (!isFinite(minX)) {
+        minX = minY = minZ = 0;
+        maxX = maxY = maxZ = 0;
+    }
+
+    return { minX, minY, minZ, maxX, maxY, maxZ };
+}
+
+function buildNucleiCenters(bounds, count) {
+    const cx = (bounds.minX + bounds.maxX) * 0.5;
+    const cy = (bounds.minY + bounds.maxY) * 0.5;
+    const spanX = Math.max(1, (bounds.maxX - bounds.minX));
+    const spanY = Math.max(1, (bounds.maxY - bounds.minY));
+    const span = Math.max(spanX, spanY);
+
+    const cz = bounds.minZ + (bounds.maxZ - bounds.minZ) * 0.35;
+    const ringR = span * 0.18;
+
+    const centers = [];
+    const c = Math.max(0, Math.min(24, count | 0));
+    if (c <= 0) return centers;
+
+    for (let i = 0; i < c; i++) {
+        const t = (i / c) * Math.PI * 2.0;
+        const r = ringR * (0.80 + 0.20 * (i % 2));
+        centers.push({
+            x: cx + Math.cos(t) * r,
+            y: cy + Math.sin(t) * r,
+            z: cz + ((i % 3) - 1) * 0.35
+        });
+    }
+
+    return centers;
+}
+
+function regionWeights(p, bounds, view, nucleiCenters) {
+    const cx = (bounds.minX + bounds.maxX) * 0.5;
+    const cy = (bounds.minY + bounds.maxY) * 0.5;
+
+    const spanX = Math.max(1, (bounds.maxX - bounds.minX));
+    const spanY = Math.max(1, (bounds.maxY - bounds.minY));
+    const spanZ = Math.max(1, (bounds.maxZ - bounds.minZ));
+
+    const rx = spanX * clamp(view.thalamusRadiusXY, 0.05, 0.95);
+    const ry = spanY * clamp(view.thalamusRadiusXY, 0.05, 0.95);
+    const rz = spanZ * clamp(view.thalamusRadiusZ, 0.05, 0.95);
+
+    const cz = bounds.minZ + spanZ * 0.35;
+
+    const dx = (p.x0 - cx) / rx;
+    const dy = (p.y0 - cy) / ry;
+    const dz = (p.z0 - cz) / rz;
+
+    const ell = (dx * dx) + (dy * dy) + (dz * dz);
+
+    let th = clamp(1.0 - ell, 0.0, 1.0);
+    th = th * th * th;
+
+    let nu = 0.0;
+    const nr = Math.max(0.0001, (Math.max(spanX, spanY) * clamp(view.nucleiRadius, 0.03, 0.80)));
+    const invNr2 = 1.0 / (nr * nr);
+
+    for (let i = 0; i < nucleiCenters.length; i++) {
+        const c = nucleiCenters[i];
+        const ax = p.x0 - c.x;
+        const ay = p.y0 - c.y;
+        const az = p.z0 - c.z;
+        const d2 = (ax * ax) + (ay * ay) + (az * az);
+        const w = Math.exp(-d2 * invNr2);
+        if (w > nu) nu = w;
+    }
+
+    const cortex = clamp(1.0 - (th * 0.80) - (nu * 0.90), 0.10, 1.0);
+    return { cortex, thalamus: th, nuclei: nu };
+}
+
+function columnBand(p, view) {
+    if (!view.enableColumnBanding) return 0.0;
+    const period = Math.max(1, view.columnBandPeriod | 0);
+    const bx = (p.x0 % period) === 0 ? 1.0 : -1.0;
+    const by = (p.y0 % period) === 0 ? 1.0 : -1.0;
+    return ((bx + by) * 0.5) * clamp(view.columnBandStrength, 0.0, 1.0);
+}
+
+function baseRegionColor(weights) {
+    const cortex = { r: 0.18, g: 0.28, b: 0.62 };
+    const thal = { r: 0.75, g: 0.22, b: 0.88 };
+    const nuc = { r: 0.92, g: 0.72, b: 0.20 };
+
+    const tNu = clamp(weights.nuclei, 0.0, 1.0);
+    const tTh = clamp(weights.thalamus, 0.0, 1.0);
+    const tCx = clamp(weights.cortex, 0.0, 1.0);
+
+    let r = cortex.r * tCx + thal.r * tTh + nuc.r * tNu;
+    let g = cortex.g * tCx + thal.g * tTh + nuc.g * tNu;
+    let b = cortex.b * tCx + thal.b * tTh + nuc.b * tNu;
+
+    const s = Math.max(0.25, (tCx + tTh + tNu));
+    r /= s; g /= s; b /= s;
+
+    return { r: clamp(r, 0, 1), g: clamp(g, 0, 1), b: clamp(b, 0, 1) };
+}
+
+function hash01(a, b) {
+    // cheap deterministic hash -> [0..1)
+    let x = (a * 73856093) ^ (b * 19349663);
+    x = (x ^ (x >>> 13)) * 1274126177;
+    x = (x ^ (x >>> 16)) >>> 0;
+    return (x / 4294967296.0);
 }
 
 export function createNetwork3D(hostEl) {
@@ -91,28 +214,19 @@ export function createNetwork3D(hostEl) {
     const amb = new THREE.AmbientLight(0xffffff, 0.25);
     scene.add(amb);
 
-    // Overlays
-    const overlays = {
-        grid: null,
-        axes: null,
-        laminaGroup: null
-    };
+    const overlays = { grid: null, axes: null, laminaGroup: null };
 
-    // Hover picking
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2(9999, 9999);
 
     const state = {
-        scene,
-        renderer,
-        camera,
-        controls,
-        hostEl,
+        scene, renderer, camera, controls, hostEl,
 
-        nodesObj: null,
+        nodeMesh: null,    // InstancedMesh
+        nodeGeom: null,    // SphereGeometry
+        nodeMat: null,     // MeshStandardMaterial
+
         edgesObj: null,
-
-        nodeGeom: null,
         edgeGeom: null,
 
         overlays,
@@ -121,28 +235,22 @@ export function createNetwork3D(hostEl) {
         _onPointerMove: null,
         _onPointerLeave: null,
 
-        // Last snapshot characteristics (for re-use decisions)
         _lastStepIndex: -1,
         _lastNodeCount: 0,
-        _lastEdgeCount: 0,
         _lastRadius: 0,
 
-        // hover state
         _pointer: pointer,
         _raycaster: raycaster,
         _hoverId: null,
         _hoverPos: null,
 
-        // cached id->pos map for edges
         _posById: null,
-
-        // last applied view (shallow)
+        _idsByInstance: null,
         _view: null
     };
 
     function animate() {
-        if (state.nodesObj && state._view) {
-            state._raycaster.params.Points.threshold = state._view.hoverPointThreshold;
+        if (state.nodeMesh && state._view) {
             pickHover(state);
         }
 
@@ -190,28 +298,28 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
 
     state._view = view;
 
-    // Fog (cortical depth cue)
     if (view.enableFog) {
-        // exponential fog, density tunable
         state.scene.fog = new THREE.FogExp2(0x000000, clamp(view.fogDensity, 0.0, 0.2));
     } else {
         state.scene.fog = null;
     }
 
-    // Overlays: grid, axes, laminar planes
     updateOverlays(state, THREE, snap, view);
 
     const nodes = snap.nodes;
     const synapses = snap.synapses;
 
-    // id -> scaled position
+    const bounds = computeBounds(nodes);
+    const nucleiCenters = buildNucleiCenters(bounds, view.nucleiCount);
+
     const posById = new Map();
-    let minZ = Infinity, maxZ = -Infinity;
+    const idsByInstance = new Array(nodes.length);
 
-    for (const n of nodes) {
+    for (let i = 0; i < nodes.length; i++) {
+        const n = nodes[i];
         const id = n.id ?? n.Id;
-        const pos = n.pos ?? n.Pos;
 
+        const pos = n.pos ?? n.Pos;
         const x0 = (pos.x ?? pos.X);
         const y0 = (pos.y ?? pos.Y);
         const z0 = (pos.z ?? pos.Z);
@@ -221,14 +329,12 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
         const z = z0 * view.zScale;
 
         posById.set(id, { x, y, z, x0, y0, z0 });
-
-        if (z0 < minZ) minZ = z0;
-        if (z0 > maxZ) maxZ = z0;
+        idsByInstance[i] = id;
     }
 
     state._posById = posById;
+    state._idsByInstance = idsByInstance;
 
-    // keep hover if possible
     if (state._hoverId != null && !posById.has(state._hoverId)) {
         state._hoverId = null;
         state._hoverPos = null;
@@ -237,111 +343,126 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
         state._hoverPos = hp ? { x0: hp.x0, y0: hp.y0, z0: hp.z0 } : null;
     }
 
-    const zSpan = Math.max(1, (maxZ - minZ));
-
-    // ---------------- Nodes: reuse geometry when nodeCount unchanged ----------------
-
     const nodeCount = nodes.length;
-    const needRebuildNodes = (!state.nodeGeom || !state.nodesObj || state._lastNodeCount !== nodeCount);
+    const needRebuildNodes =
+        (!state.nodeMesh || !state.nodeGeom || !state.nodeMat || state._lastNodeCount !== nodeCount);
 
     if (needRebuildNodes) {
-        // remove old
-        if (state.nodesObj) {
-            state.scene.remove(state.nodesObj);
-            state.nodeGeom.dispose();
-            state.nodesObj.material.dispose();
-            state.nodesObj = null;
+        if (state.nodeMesh) {
+            state.scene.remove(state.nodeMesh);
+            state.nodeMesh.geometry.dispose();
+            state.nodeMesh.material.dispose();
+            state.nodeMesh = null;
             state.nodeGeom = null;
+            state.nodeMat = null;
         }
 
-        const positions = new Float32Array(nodeCount * 3);
-        const colors = new Float32Array(nodeCount * 3);
+        const geom = new THREE.SphereGeometry(1, 12, 10);
 
-        const geom = new THREE.BufferGeometry();
-        geom.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-        geom.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-
-        const mat = new THREE.PointsMaterial({
-            size: view.nodeSize,
+        const mat = new THREE.MeshStandardMaterial({
             vertexColors: true,
             transparent: true,
-            opacity: view.nodeOpacity,
-            depthWrite: false
+            opacity: clamp(view.nodeOpacity, 0.1, 1.0),
+            roughness: 0.55,
+            metalness: 0.05
         });
 
-        const points = new THREE.Points(geom, mat);
+        const mesh = new THREE.InstancedMesh(geom, mat, nodeCount);
+        mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+
+        // Enable per-instance colours
+        mesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(nodeCount * 3), 3);
 
         state.nodeGeom = geom;
-        state.nodesObj = points;
-        state.scene.add(points);
+        state.nodeMat = mat;
+        state.nodeMesh = mesh;
+        state.scene.add(mesh);
     } else {
-        // update node material live
-        state.nodesObj.material.size = view.nodeSize;
-        state.nodesObj.material.opacity = view.nodeOpacity;
+        state.nodeMat.opacity = clamp(view.nodeOpacity, 0.1, 1.0);
     }
 
-    // Update node buffers (positions + colors)
+    // Update instances (positions, colours, sizes)
     {
-        const posAttr = state.nodeGeom.getAttribute("position");
-        const colAttr = state.nodeGeom.getAttribute("color");
+        const hover = state._hoverPos;
+        const mesh = state.nodeMesh;
 
-        const hover = state._hoverPos; // {x0,y0,z0} in *unscaled* grid coords
+        const tmpMat = new THREE.Matrix4();
+        const tmpPos = new THREE.Vector3();
+        const tmpScale = new THREE.Vector3();
+        const tmpQuat = new THREE.Quaternion();
+
+        const baseR = Math.max(0.01, view.nodeSize);
 
         for (let i = 0; i < nodeCount; i++) {
             const n = nodes[i];
-
-            const id = n.id ?? n.Id;
+            const id = idsByInstance[i];
             const p = posById.get(id);
             if (!p) continue;
 
-            posAttr.setXYZ(i, p.x, p.y, p.z);
+            // Base region colour
+            let rgb = { r: 0.35, g: 0.35, b: 0.35 };
 
+            if (view.enableRegions) {
+                const w = regionWeights(p, bounds, view, nucleiCenters);
+                rgb = baseRegionColor(w);
+            }
+
+            // Activity overlay
             const vRaw = n.v ?? n.V ?? 0;
             const spiked = n.spiked ?? n.Spiked ?? false;
-
             const v = clamp((vRaw + 5.0) / 10.0, 0.0, 1.0);
 
-            let r = v;
-            let g = 0.25 + 0.35 * (1.0 - Math.abs(v - 0.5) * 2.0);
-            let b = 1.0 - v;
+            rgb.r = clamp(rgb.r + (v * 0.20), 0, 1);
+            rgb.b = clamp(rgb.b + ((1.0 - v) * 0.10), 0, 1);
 
             if (spiked) {
-                r = clamp(r + 0.35, 0.0, 1.0);
-                g = clamp(g + 0.35, 0.0, 1.0);
-                b = clamp(b + 0.35, 0.0, 1.0);
+                rgb.r = clamp(rgb.r + 0.20, 0, 1);
+                rgb.g = clamp(rgb.g + 0.20, 0, 1);
+                rgb.b = clamp(rgb.b + 0.20, 0, 1);
             }
 
-            // laminar tint by z-layer (unscaled z0)
-            const zNorm = (p.z0 - minZ) / zSpan;
-            const t = layerTint01(zNorm);
-            r = clamp(r + t.r, 0.0, 1.0);
-            g = clamp(g + t.g, 0.0, 1.0);
-            b = clamp(b + t.b, 0.0, 1.0);
+            // Minicolumn banding
+            const band = columnBand(p, view);
+            if (band !== 0) {
+                const t = clamp(band, -0.5, 0.5);
+                rgb.r = clamp(rgb.r + t * 0.08, 0, 1);
+                rgb.g = clamp(rgb.g + t * 0.08, 0, 1);
+                rgb.b = clamp(rgb.b + t * 0.10, 0, 1);
+            }
 
-            // Column highlight (same x0/y0)
+            // Hover boosts
+            let rScale = baseR;
             if (hover) {
                 if (p.x0 === hover.x0 && p.y0 === hover.y0) {
-                    r = clamp(r + view.columnBoost * 0.35, 0.0, 1.0);
-                    g = clamp(g + view.columnBoost * 0.35, 0.0, 1.0);
-                    b = clamp(b + view.columnBoost * 0.35, 0.0, 1.0);
+                    const boost = clamp(view.columnBoost, 0.0, 2.0) * 0.12;
+                    rgb.r = clamp(rgb.r + boost, 0, 1);
+                    rgb.g = clamp(rgb.g + boost, 0, 1);
+                    rgb.b = clamp(rgb.b + boost, 0, 1);
                 }
                 if (id === state._hoverId) {
-                    r = clamp(r + view.hoverBoost * 0.40, 0.0, 1.0);
-                    g = clamp(g + view.hoverBoost * 0.40, 0.0, 1.0);
-                    b = clamp(b + view.hoverBoost * 0.40, 0.0, 1.0);
+                    const boost = clamp(view.hoverBoost, 0.0, 2.0) * 0.18;
+                    rgb.r = clamp(rgb.r + boost, 0, 1);
+                    rgb.g = clamp(rgb.g + boost, 0, 1);
+                    rgb.b = clamp(rgb.b + boost, 0, 1);
+                    rScale = baseR * 1.55;
                 }
             }
 
-            colAttr.setXYZ(i, r, g, b);
+            // Instance transform
+            tmpPos.set(p.x, p.y, p.z);
+            tmpQuat.set(0, 0, 0, 1);
+            tmpScale.set(rScale, rScale, rScale);
+            tmpMat.compose(tmpPos, tmpQuat, tmpScale);
+            mesh.setMatrixAt(i, tmpMat);
+
+            mesh.setColorAt(i, new THREE.Color(rgb.r, rgb.g, rgb.b));
         }
 
-        posAttr.needsUpdate = true;
-        colAttr.needsUpdate = true;
+        mesh.instanceMatrix.needsUpdate = true;
+        if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
     }
 
-    // ---------------- Edges: rebuild each time (count varies); still thinned ----------------
-
-    // Remove old edges
+    // --- Edges: rebuild with aggressive thinning for readability ---
     if (state.edgesObj) {
         state.scene.remove(state.edgesObj);
         state.edgeGeom.dispose();
@@ -352,7 +473,6 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
 
     const edgePositions = [];
     const edgeColors = [];
-    const hoverId = state._hoverId;
 
     const softFade = Math.max(0.0001, view.edgeSoftFadeLen);
     const hardCull = Math.max(softFade + 0.0001, view.edgeHardCullLen);
@@ -366,48 +486,52 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
         const kind = e.kind ?? e.Kind ?? 0;
 
         const a = posById.get(pre);
-        const bpos = posById.get(post);
-        if (!a || !bpos) continue;
+        const b = posById.get(post);
+        if (!a || !b) continue;
 
-        const dx = bpos.x - a.x;
-        const dy = bpos.y - a.y;
-        const dz = bpos.z - a.z;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dz = b.z - a.z;
         const len = Math.sqrt(dx * dx + dy * dy + dz * dz);
 
         if (len > hardCull) continue;
 
-        // brightness from weight magnitude
-        const w = Math.min(Math.abs(wRaw), 2.0);
-        let bright = clamp(0.12 + (w / 2.0) * 0.88, 0.12, 1.0);
+        // Thin long-ish edges even if within cull radius:
+        // Probability drops with length to reveal local structure.
+        const len01 = clamp(len / hardCull, 0.0, 1.0);
+        const keepProb = clamp(1.0 - (len01 * len01 * 0.85), 0.12, 1.0);
+        if (hash01(pre, post) > keepProb) continue;
 
-        // fade longer edges
+        const w = Math.min(Math.abs(wRaw), 2.0);
+        let bright = clamp(0.10 + (w / 2.0) * 0.90, 0.10, 1.0);
+
         if (len > softFade) {
             const t = clamp((len - softFade) / (hardCull - softFade), 0.0, 1.0);
-            bright *= (1.0 - 0.75 * (t * t));
+            bright *= (1.0 - 0.80 * (t * t));
         }
 
-        // kind coloring (exc vs inh)
         let r = kind === 0 ? 1.0 : 0.25;
-        let g = kind === 0 ? 0.65 : 0.45;
-        let bb = kind === 0 ? 0.25 : 1.0;
+        let g = kind === 0 ? 0.62 : 0.45;
+        let bb = kind === 0 ? 0.22 : 1.0;
 
-        // hover boost for incident edges
-        if (hoverId != null && (pre === hoverId || post === hoverId)) {
-            bright = clamp(bright * 1.25, 0.0, 1.0);
-        }
+        // Slight desaturation for far edges (adds depth)
+        const desat = clamp(len01 * 0.35, 0.0, 0.35);
+        r = lerp(r, 0.55, desat);
+        g = lerp(g, 0.55, desat);
+        bb = lerp(bb, 0.55, desat);
 
         r *= bright; g *= bright; bb *= bright;
 
-        edgePositions.push(a.x, a.y, a.z, bpos.x, bpos.y, bpos.z);
+        edgePositions.push(a.x, a.y, a.z, b.x, b.y, b.z);
         edgeColors.push(r, g, bb, r, g, bb);
     }
 
     const epos = new Float32Array(edgePositions);
-    const ecolor = new Float32Array(edgeColors);
+    const ecol = new Float32Array(edgeColors);
 
     const edgeGeom = new THREE.BufferGeometry();
     edgeGeom.setAttribute("position", new THREE.BufferAttribute(epos, 3));
-    edgeGeom.setAttribute("color", new THREE.BufferAttribute(ecolor, 3));
+    edgeGeom.setAttribute("color", new THREE.BufferAttribute(ecol, 3));
 
     const edgeMat = new THREE.LineBasicMaterial({
         vertexColors: true,
@@ -422,10 +546,9 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
     state.edgesObj = edgeLines;
     state.scene.add(edgeLines);
 
-    // ---------------- Auto-fit camera if lattice size changed ----------------
-
+    // Auto-fit camera when topology changes noticeably
     if (nodeCount > 0) {
-        const bbx = new THREE.Box3().setFromObject(state.nodesObj);
+        const bbx = new THREE.Box3().setFromObject(state.nodeMesh);
         const size = bbx.getSize(new THREE.Vector3());
         const center = bbx.getCenter(new THREE.Vector3());
 
@@ -433,7 +556,6 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
         const radius = Math.max(2.0, rawRadius * 0.75 + 1.0);
 
         const stepIndex = snap.stepIndex;
-
         const stepDecreased = (state._lastStepIndex >= 0 && stepIndex < state._lastStepIndex);
         const likelyNewRun = (stepIndex === 0 && state._lastStepIndex > 0);
         const nodeCountChanged = (nodeCount !== state._lastNodeCount);
@@ -462,12 +584,11 @@ export function updateNetwork3D(state, snapshotRaw, viewRaw) {
 }
 
 function updateOverlays(state, THREE, snap, view) {
-    // Grid
     if (view.showGrid && !state.overlays.grid) {
         const g = new THREE.GridHelper(200, 50, 0x444444, 0x222222);
         g.position.set(0, 0, 0);
         g.material.transparent = true;
-        g.material.opacity = 0.25;
+        g.material.opacity = 0.18;
         state.overlays.grid = g;
         state.scene.add(g);
     }
@@ -476,11 +597,10 @@ function updateOverlays(state, THREE, snap, view) {
         state.overlays.grid = null;
     }
 
-    // Axes
     if (view.showAxes && !state.overlays.axes) {
         const a = new THREE.AxesHelper(10);
         a.material.transparent = true;
-        a.material.opacity = 0.6;
+        a.material.opacity = 0.55;
         state.overlays.axes = a;
         state.scene.add(a);
     }
@@ -489,7 +609,6 @@ function updateOverlays(state, THREE, snap, view) {
         state.overlays.axes = null;
     }
 
-    // Laminar planes (one per integer Z layer)
     if (!view.showLaminarPlanes) {
         if (state.overlays.laminaGroup) {
             state.scene.remove(state.overlays.laminaGroup);
@@ -502,16 +621,8 @@ function updateOverlays(state, THREE, snap, view) {
     const nodes = snap.nodes;
     if (!nodes || nodes.length === 0) return;
 
-    // determine z range in *unscaled* coordinates
-    let minZ = Infinity, maxZ = -Infinity;
-    for (const n of nodes) {
-        const p = n.pos ?? n.Pos;
-        const z0 = (p.z ?? p.Z);
-        if (z0 < minZ) minZ = z0;
-        if (z0 > maxZ) maxZ = z0;
-    }
+    const b = computeBounds(nodes);
 
-    // rebuild group each update (cheap: only a few planes)
     if (state.overlays.laminaGroup) {
         state.scene.remove(state.overlays.laminaGroup);
         disposeGroup(state.overlays.laminaGroup);
@@ -519,26 +630,22 @@ function updateOverlays(state, THREE, snap, view) {
     }
 
     const grp = new THREE.Group();
-
     const width = 220;
     const height = 220;
 
-    for (let z0 = minZ; z0 <= maxZ; z0++) {
+    for (let z0 = b.minZ; z0 <= b.maxZ; z0++) {
         const z = z0 * view.zScale;
 
-        const zNorm = (z0 - minZ) / Math.max(1, (maxZ - minZ));
-        const tint = layerTint01(zNorm);
-
         const mat = new THREE.MeshBasicMaterial({
-            color: new THREE.Color(0.08 + tint.r, 0.08 + tint.g, 0.08 + tint.b),
+            color: new THREE.Color(0.10, 0.10, 0.12),
             transparent: true,
-            opacity: 0.06,
+            opacity: 0.04,
             depthWrite: false
         });
 
         const geom = new THREE.PlaneGeometry(width, height);
         const plane = new THREE.Mesh(geom, mat);
-        plane.rotation.x = Math.PI / 2; // XY plane
+        plane.rotation.x = Math.PI / 2;
         plane.position.set(0, 0, z);
 
         grp.add(plane);
@@ -574,16 +681,19 @@ export function disposeNetwork3D(state) {
         disposeGroup(state.overlays.laminaGroup);
     }
 
-    if (state.nodesObj) {
-        state.scene.remove(state.nodesObj);
-        state.nodeGeom.dispose();
-        state.nodesObj.material.dispose();
+    if (state.nodeMesh) {
+        state.scene.remove(state.nodeMesh);
+        state.nodeMesh.geometry.dispose();
+        state.nodeMesh.material.dispose();
+        state.nodeMesh = null;
     }
 
     if (state.edgesObj) {
         state.scene.remove(state.edgesObj);
         state.edgeGeom.dispose();
         state.edgesObj.material.dispose();
+        state.edgesObj = null;
+        state.edgeGeom = null;
     }
 
     state.renderer.dispose();
@@ -593,10 +703,9 @@ export function disposeNetwork3D(state) {
     }
 }
 
-// ------------------------- hover picking -------------------------
+// ------------------------- hover picking (InstancedMesh) -------------------------
 
 function pickHover(state) {
-    // pointer offscreen clears hover
     if (state._pointer.x > 10 || state._pointer.y > 10) {
         if (state._hoverId != null) {
             state._hoverId = null;
@@ -607,7 +716,7 @@ function pickHover(state) {
 
     state._raycaster.setFromCamera(state._pointer, state.camera);
 
-    const intersects = state._raycaster.intersectObject(state.nodesObj, false);
+    const intersects = state._raycaster.intersectObject(state.nodeMesh, false);
     if (!intersects || intersects.length === 0) {
         if (state._hoverId != null) {
             state._hoverId = null;
@@ -617,24 +726,13 @@ function pickHover(state) {
     }
 
     const hit = intersects[0];
-    const idx = hit.index;
+    const inst = hit.instanceId;
 
-    const posAttr = state.nodeGeom.getAttribute("position");
-    const hx = posAttr.getX(idx);
-    const hy = posAttr.getY(idx);
-    const hz = posAttr.getZ(idx);
+    if (inst == null || !state._idsByInstance) return;
 
-    // convert scaled position -> unscaled integer grid (best-effort)
-    const vx = state._view ? state._view.spacingXY : 1.0;
-    const vz = state._view ? state._view.zScale : 1.0;
+    const id = state._idsByInstance[inst];
+    state._hoverId = id;
 
-    const gx = Math.round(hx / vx);
-    const gy = Math.round(hy / vx);
-    const gz = Math.round(hz / vz);
-
-    state._hoverPos = { x0: gx, y0: gy, z0: gz };
-
-    // ID inference: canon IDs are sequential and snapshot nodes order matches that.
-    // If in future you break that assumption, we’ll embed ids as an attribute.
-    state._hoverId = idx + 1;
+    const p = state._posById ? state._posById.get(id) : null;
+    state._hoverPos = p ? { x0: p.x0, y0: p.y0, z0: p.z0 } : null;
 }

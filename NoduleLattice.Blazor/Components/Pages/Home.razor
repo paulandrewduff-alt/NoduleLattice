@@ -130,7 +130,7 @@
         <header class="card-h">
             <div>
                 <div class="h-title">3D Network</div>
-                <div class="h-sub">Cortex slab • lamina planes • edge thinning • hover column highlight</div>
+                <div class="h-sub">Cortex slab • lamina • regions • minicolumn banding</div>
             </div>
             <div class="pill mono">step @_stepIndex</div>
         </header>
@@ -186,6 +186,38 @@
                         <span>Fog</span>
                     </label>
                 </div>
+
+                <hr style="grid-column: 1 / -1; opacity:0.15;" />
+
+                <label class="lbl">Regions</label>
+                <div class="row">
+                    <input type="checkbox" @bind="_view.EnableRegions" />
+                    <span class="muted">Cortex / Thalamus core / Nuclei clusters (inferred)</span>
+                </div>
+
+                <label class="lbl">Thalamus Radius XY</label>
+                <input class="input" type="number" step="0.01" min="0.05" max="0.70" @bind="_view.ThalamusRadiusXY" />
+
+                <label class="lbl">Thalamus Radius Z</label>
+                <input class="input" type="number" step="0.01" min="0.05" max="0.90" @bind="_view.ThalamusRadiusZ" />
+
+                <label class="lbl">Nuclei Count</label>
+                <input class="input" type="number" min="0" max="24" @bind="_view.NucleiCount" />
+
+                <label class="lbl">Nuclei Radius</label>
+                <input class="input" type="number" step="0.01" min="0.03" max="0.40" @bind="_view.NucleiRadius" />
+
+                <label class="lbl">Column Banding</label>
+                <div class="row">
+                    <input type="checkbox" @bind="_view.EnableColumnBanding" />
+                    <span class="muted">Alternating stripes to suggest minicolumns</span>
+                </div>
+
+                <label class="lbl">Band Period</label>
+                <input class="input" type="number" min="1" max="8" @bind="_view.ColumnBandPeriod" />
+
+                <label class="lbl">Band Strength</label>
+                <input class="input" type="number" step="0.01" min="0.00" max="0.50" @bind="_view.ColumnBandStrength" />
             </div>
         </details>
     </section>
@@ -203,14 +235,13 @@
     private int _runStepsPerTick = 2;
 
     private bool _autoPoll = true;
-    private int _pollMs = 66; // ~15Hz UI refresh
+    private int _pollMs = 66;
 
     private CancellationTokenSource? _pollCts;
     private Task? _pollTask;
 
     private NetworkViewOptions _view = new();
 
-    // Thin snapshot UI
     private bool _thinSnapshots = true;
     private int _thinMaxEdges = 12_000;
     private float _thinMaxLen = 7f;
@@ -328,7 +359,7 @@
                 }
                 catch
                 {
-                    // swallow polling errors; Api.LastError will show on manual Refresh
+                    // swallow polling errors
                 }
             }
         }, ct);

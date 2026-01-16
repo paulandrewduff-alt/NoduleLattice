@@ -1,4 +1,11 @@
-﻿using Microsoft.AspNetCore.Components;
+﻿// ============================================================================
+// FILE: NoduleLattice.Blazor/Components/Network/Network3D.razor.cs
+// PURPOSE:
+//   - Cache-bust JS import so renderer updates always take effect.
+//   - Always push View changes even if step didn't move.
+// ============================================================================
+
+using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
 using NoduleLattice.Blazor.Models;
 
@@ -7,6 +14,9 @@ namespace NoduleLattice.Blazor.Components.Network;
 public partial class Network3D : ComponentBase, IAsyncDisposable
 {
     [Inject] private IJSRuntime JS { get; set; } = default!;
+
+    // Increment this when you change wwwroot/js/network3d.js
+    private const string JsVersion = "v=3";
 
     private IJSObjectReference? _module;
     private IJSObjectReference? _instance;
@@ -22,7 +32,7 @@ public partial class Network3D : ComponentBase, IAsyncDisposable
         {
             try
             {
-                _module = await JS.InvokeAsync<IJSObjectReference>("import", "/js/network3d.js");
+                _module = await JS.InvokeAsync<IJSObjectReference>("import", $"/js/network3d.js?{JsVersion}");
                 _instance = await _module.InvokeAsync<IJSObjectReference>("createNetwork3D", _host);
             }
             catch (JSException ex)
@@ -42,16 +52,12 @@ public partial class Network3D : ComponentBase, IAsyncDisposable
         if (_module is null || _instance is null) return;
         if (Snapshot is null) return;
 
-        // If only view changed, we still want to repaint.
         var step = Snapshot.StepIndex;
         var view = View ?? new NetworkViewOptions();
 
-        if (step == _lastStep && firstRender == false)
-        {
-            // allow view-only changes to flow through:
-            // we don't have a cheap "view hash", so always update if View is non-null.
-            if (View is null) return;
-        }
+        // If only view changed, we still want to repaint.
+        if (step == _lastStep && View is null)
+            return;
 
         _lastStep = step;
 
