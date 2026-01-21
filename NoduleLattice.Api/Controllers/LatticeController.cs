@@ -1,14 +1,4 @@
-﻿// ============================================================================
-// FILE: NoduleLattice.Api/Controllers/LatticeController.cs
-// PURPOSE:
-//   - All request bodies use NoduleLattice.Api.Dtos (avoid ambiguity)
-//   - Snapshot supports thin mode via query params (non-breaking)
-// ROUTES:
-//   GET  /api/lattice/snapshot?mode=thin&maxEdges=12000&maxLen=7
-//   GET  /api/lattice/snapshot             (full)
-// ============================================================================
-
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using NoduleLattice.Api.Dtos;
 using NoduleLattice.Api.Services;
 
@@ -25,34 +15,23 @@ public sealed class LatticeController : ControllerBase
         _host = host;
     }
 
-    [HttpPost("create")]
-    public ActionResult<LatticeSnapshotDto> Create([FromBody] CreateLatticeRequest req)
-        => Ok(_host.Create(req));
+    [HttpGet("snapshot")]
+    public ActionResult<LatticeSnapshotDto> Snapshot(
+        [FromQuery] string? mode = null,
+        [FromQuery] int maxEdges = 12000,
+        [FromQuery] float maxLen = 7f)
+    {
+        if (string.Equals(mode, "thin", StringComparison.OrdinalIgnoreCase))
+            return Ok(_host.GetSnapshotThin(Math.Max(0, maxEdges), Math.Max(0.1f, maxLen)));
+
+        return Ok(_host.GetSnapshot());
+    }
 
     [HttpPost("step")]
     public IActionResult Step([FromBody] StepRequest req)
     {
-        _host.Step(req.Steps);
+        _host.Step(Math.Max(1, req.Steps));
         return Ok();
-    }
-
-    // Non-breaking: default is full snapshot
-    // Thin snapshot: mode=thin
-    [HttpGet("snapshot")]
-    public ActionResult<LatticeSnapshotDto> Snapshot(
-        [FromQuery] string? mode = null,
-        [FromQuery] int? maxEdges = null,
-        [FromQuery] float? maxLen = null)
-    {
-        bool thin = string.Equals(mode, "thin", StringComparison.OrdinalIgnoreCase);
-
-        if (!thin)
-            return Ok(_host.GetSnapshot());
-
-        int edges = maxEdges is null ? 12_000 : Math.Clamp(maxEdges.Value, 100, 250_000);
-        float len = maxLen is null ? 7f : Math.Clamp(maxLen.Value, 0.5f, 200f);
-
-        return Ok(_host.GetSnapshotThin(edges, len));
     }
 
     [HttpPost("inject")]
@@ -90,18 +69,22 @@ public sealed class LatticeController : ControllerBase
         return Ok();
     }
 
-    [HttpGet("archive")]
-    public ActionResult<ArchiveDto> GetArchive()
+    [HttpPost("create")]
+    public ActionResult<LatticeSnapshotDto> Create([FromBody] CreateLatticeRequest req)
+        => Ok(_host.Create(req));
+
+    [HttpPost("archive/save")]
+    public ActionResult<ArchiveDto> SaveArchive()
         => Ok(_host.SaveArchive());
 
-    [HttpPost("archive")]
+    [HttpPost("archive/load")]
     public IActionResult LoadArchive([FromBody] ArchiveDto dto)
     {
         _host.LoadArchive(dto);
         return Ok();
     }
 
-    [HttpPost("validate")]
-    public IActionResult Validate()
+    [HttpGet("validate")]
+    public ActionResult<object> Validate()
         => Ok(_host.Validate());
 }

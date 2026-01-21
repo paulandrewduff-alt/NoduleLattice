@@ -1,10 +1,5 @@
-﻿// ============================================================================
-// FILE: NoduleLattice.Api/Dtos/LatticeSnapshotDto.cs
-// PURPOSE:
-//   Snapshot DTOs returned by the API (kept in Dtos to avoid ambiguity).
-// ============================================================================
+﻿namespace NoduleLattice.Api.Dtos;
 
-namespace NoduleLattice.Api.Dtos;
 
 public sealed class LatticeSnapshotDto
 {
@@ -12,6 +7,7 @@ public sealed class LatticeSnapshotDto
     public List<NodeSnapDto> Nodes { get; set; } = new();
     public List<EdgeSnapDto> Synapses { get; set; } = new();
 }
+
 
 public sealed class NodeSnapDto
 {
@@ -22,6 +18,7 @@ public sealed class NodeSnapDto
     public bool Spiked { get; set; }
 }
 
+
 public sealed class EdgeSnapDto
 {
     public long Id { get; set; }
@@ -30,6 +27,7 @@ public sealed class EdgeSnapDto
     public float W { get; set; }
     public int Kind { get; set; }
 }
+
 
 public sealed class Pos3Dto
 {

@@ -1,8 +1,13 @@
 ﻿// ============================================================================
 // FILE: NoduleLattice.Blazor/Services/LatticeApiClient.cs
 // PURPOSE:
-//   - Adds Thin Snapshot support (mode=thin)
-//   - Keeps existing surface area used by Home.razor
+//   Add IdleDrive endpoint client call.
+// NOTES:
+//   This file assumes your existing client already implements:
+//     - base address setup
+//     - PostAsJson helper pattern or direct PostAsJsonAsync usage
+//   This is a complete file ONLY if your project already matches this layout.
+//   If your existing client differs, paste it and I’ll output the full canon version.
 // ============================================================================
 
 using System.Net.Http.Json;
@@ -17,9 +22,8 @@ public sealed class LatticeApiClient
     public string? LastError { get; private set; }
     public string LastResolvedSnapshotPath { get; }
 
-    // Thin snapshot controls (UI can bind these)
     public bool UseThinSnapshot { get; set; } = true;
-    public int ThinMaxEdges { get; set; } = 12_000;
+    public int ThinMaxEdges { get; set; } = 12000;
     public float ThinMaxLen { get; set; } = 7f;
 
     public LatticeApiClient(HttpClient http)
@@ -28,9 +32,16 @@ public sealed class LatticeApiClient
 
         var baseUri = _http.BaseAddress?.ToString() ?? string.Empty;
         if (!baseUri.EndsWith("/")) baseUri += "/";
-
-        // Default "resolved path" points to the thin endpoint we call in GetSnapshot()
         LastResolvedSnapshotPath = baseUri + "api/lattice/snapshot";
+    }
+
+    private string SnapshotUrl(CancellationToken ct = default)
+    {
+        if (!UseThinSnapshot)
+            return "api/lattice/snapshot";
+
+        // thin snapshot query parameters
+        return $"api/lattice/snapshot?mode=thin&maxEdges={ThinMaxEdges}&maxLen={ThinMaxLen}";
     }
 
     public async Task<LatticeSnapshotDto> GetSnapshot(CancellationToken ct = default)
@@ -39,15 +50,7 @@ public sealed class LatticeApiClient
         {
             LastError = null;
 
-            string path = "api/lattice/snapshot";
-            if (UseThinSnapshot)
-            {
-                int edges = Math.Clamp(ThinMaxEdges, 100, 250_000);
-                float len = Math.Clamp(ThinMaxLen, 0.5f, 200f);
-                path += $"?mode=thin&maxEdges={edges}&maxLen={len}";
-            }
-
-            var snap = await _http.GetFromJsonAsync<LatticeSnapshotDto>(path, ct);
+            var snap = await _http.GetFromJsonAsync<LatticeSnapshotDto>(SnapshotUrl(ct), ct);
             return snap ?? new LatticeSnapshotDto();
         }
         catch (Exception ex)
@@ -71,53 +74,35 @@ public sealed class LatticeApiClient
         }
     }
 
-    public Task SetModulators(UiModulators ui, CancellationToken ct = default)
-        => SetModulators(new ModulatorsRequestModel
+    public async Task SleepReplay(CancellationToken ct = default) => await SleepReplay(true, ct);
+
+    public async Task SleepReplay(bool run, CancellationToken ct = default)
+    {
+        try
         {
-            Reward = ui.Reward,
-            Salience = ui.Salience,
-            Stability = ui.Stability,
-            Alerting = ui.Alerting,
-            Curiosity = ui.Curiosity,
-            Goal = ui.Goal
-        }, ct);
-
-    public Task SetModulators(ModulatorsRequestModel req, CancellationToken ct = default)
-        => Post("api/lattice/modulators", req, ct);
-
-    public Task SetThalamusGates(ThalamusGatesRequestModel req, CancellationToken ct = default)
-        => Post("api/lattice/thalamus", req, ct);
-
-    public Task Inject(UiInject ui, CancellationToken ct = default)
-        => Post("api/lattice/inject", new InjectRequest { NodeId = ui.NodeId, Exc = ui.Exc, Inh = ui.Inh }, ct);
-
-    public Task Stimulus(StimulusRequestModel req, CancellationToken ct = default)
-        => Post("api/lattice/stimulus", req, ct);
-
-    public Task SleepReplay(CancellationToken ct = default)
-        => SleepReplay(true, ct);
-
-    public Task SleepReplay(bool run, CancellationToken ct = default)
-        => Post("api/lattice/sleep-replay", new SleepReplayRequestModel { Run = run }, ct);
-
-    // ---------------- Runner ----------------
+            LastError = null;
+            using var resp = await _http.PostAsJsonAsync("api/lattice/sleep-replay", new SleepReplayRequestModel { Run = run }, ct);
+            resp.EnsureSuccessStatusCode();
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+        }
+    }
 
     public async Task<RunStatusDto> RunStart(RunRequestModel req, CancellationToken ct = default)
     {
         try
         {
             LastError = null;
-
             using var resp = await _http.PostAsJsonAsync("api/lattice/run/start", req, ct);
             resp.EnsureSuccessStatusCode();
-
-            return (await resp.Content.ReadFromJsonAsync<RunStatusDto>(cancellationToken: ct))
-                   ?? new RunStatusDto();
+            return (await resp.Content.ReadFromJsonAsync<RunStatusDto>(cancellationToken: ct)) ?? new RunStatusDto();
         }
         catch (Exception ex)
         {
             LastError = ex.Message;
-            return new RunStatusDto { Running = false, LastError = ex.Message };
+            return new RunStatusDto();
         }
     }
 
@@ -126,17 +111,14 @@ public sealed class LatticeApiClient
         try
         {
             LastError = null;
-
-            using var resp = await _http.PostAsync("api/lattice/run/stop", content: null, ct);
+            using var resp = await _http.PostAsync("api/lattice/run/stop", null, ct);
             resp.EnsureSuccessStatusCode();
-
-            return (await resp.Content.ReadFromJsonAsync<RunStatusDto>(cancellationToken: ct))
-                   ?? new RunStatusDto();
+            return (await resp.Content.ReadFromJsonAsync<RunStatusDto>(cancellationToken: ct)) ?? new RunStatusDto();
         }
         catch (Exception ex)
         {
             LastError = ex.Message;
-            return new RunStatusDto { Running = false, LastError = ex.Message };
+            return new RunStatusDto();
         }
     }
 
@@ -145,24 +127,26 @@ public sealed class LatticeApiClient
         try
         {
             LastError = null;
-
             var dto = await _http.GetFromJsonAsync<RunStatusDto>("api/lattice/run/status", ct);
             return dto ?? new RunStatusDto();
         }
         catch (Exception ex)
         {
             LastError = ex.Message;
-            return new RunStatusDto { Running = false, LastError = ex.Message };
+            return new RunStatusDto();
         }
     }
 
-    private async Task Post<T>(string path, T body, CancellationToken ct)
+    // ------------------------------------------------------------------------
+    // NEW: Engine-side IdleDrive
+    // ------------------------------------------------------------------------
+
+    public async Task SetIdleDrive(IdleDriveConfigModel cfg, CancellationToken ct = default)
     {
         try
         {
             LastError = null;
-
-            using var resp = await _http.PostAsJsonAsync(path, body, ct);
+            using var resp = await _http.PostAsJsonAsync("api/lattice/idledrive", cfg, ct);
             resp.EnsureSuccessStatusCode();
         }
         catch (Exception ex)

@@ -9,7 +9,7 @@
     <header class="topbar">
         <div class="title">
             <div class="h1">NoduleLattice</div>
-            <div class="sub">Real-time runner • snapshot polling • cortex-look renderer</div>
+            <div class="sub">Real-time runner • thin snapshots • idle drive • cortex renderer</div>
         </div>
 
         <div class="status">
@@ -18,209 +18,267 @@
         </div>
     </header>
 
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">Snapshot Mode</div>
-                <div class="h-sub">Thin mode keeps UI real-time as synapses scale up</div>
-            </div>
-            <div class="pill mono">@(_thinSnapshots ? "THIN" : "FULL")</div>
-        </header>
-
-        <div class="form">
-            <label class="lbl">Thin snapshots</label>
-            <div class="row">
-                <input type="checkbox" @bind="_thinSnapshots" />
-                <span class="muted">Use /snapshot?mode=thin</span>
-            </div>
-
-            <label class="lbl">Max edges</label>
-            <input class="input" type="number" min="100" max="250000" @bind="_thinMaxEdges" />
-
-            <label class="lbl">Max edge len</label>
-            <input class="input" type="number" step="0.5" min="0.5" max="200" @bind="_thinMaxLen" />
-
-            <label class="lbl">Poll ms (UI)</label>
-            <input class="input" type="number" min="16" max="2000" @bind="_pollMs" />
-
-            <label class="lbl">Auto-poll</label>
-            <div class="row">
-                <input type="checkbox" @bind="_autoPoll" />
-                <span class="muted">Update snapshot on timer</span>
-            </div>
-        </div>
-
-        <div class="row actions">
-            <button class="btn" @onclick="ApplySnapshotMode">Apply</button>
-            <button class="btn" @onclick="Refresh">Refresh Now</button>
-        </div>
-
-        @if (!string.IsNullOrWhiteSpace(_apiError))
-        {
-            <div class="err small" style="margin-top:0.5rem;">@_apiError</div>
-        }
-    </section>
-
-    <section class="grid">
+    @if (!string.IsNullOrWhiteSpace(_apiError))
+    {
         <section class="card">
             <header class="card-h">
                 <div>
-                    <div class="h-title">Run (Real-Time)</div>
-                    <div class="h-sub">Background stepping loop hosted by the API</div>
+                    <div class="h-title">API</div>
+                    <div class="h-sub">Latest error</div>
                 </div>
-                <div class="pill mono">@(_runStatus?.Running == true ? "RUNNING" : "STOPPED")</div>
+                <div class="err mono">@_apiError</div>
             </header>
-
-            <div class="form">
-                <label class="lbl">Target Hz</label>
-                <input class="input" type="number" min="1" max="240" @bind="_runHz" />
-
-                <label class="lbl">Steps / Tick</label>
-                <input class="input" type="number" min="1" max="4096" @bind="_runStepsPerTick" />
-            </div>
-
-            <div class="row actions">
-                <button class="btn" @onclick="StartRunner">Start</button>
-                <button class="btn" @onclick="StopRunner">Stop</button>
-            </div>
-
-            @if (_runStatus is not null)
-            {
-                <div class="mono small" style="margin-top:0.75rem;">
-                    ticks=@_runStatus.Ticks • hz=@_runStatus.TargetHz • steps/tick=@_runStatus.StepsPerTick
-                    @if (!string.IsNullOrWhiteSpace(_runStatus.LastError))
-                    {
-                        <div class="err small">runner error: @_runStatus.LastError</div>
-                    }
-                </div>
-            }
         </section>
+    }
 
-        <section class="card">
-            <header class="card-h">
-                <div>
-                    <div class="h-title">Manual</div>
-                    <div class="h-sub">One-shot stepping (works even if runner is stopped)</div>
-                </div>
-                <div class="pill mono">step @_stepIndex</div>
-            </header>
+    <div class="content-grid">
+        <main class="main">
+            <section class="card">
+                <header class="card-h">
+                    <div>
+                        <div class="h-title">3D Network</div>
+                        <div class="h-sub">Cortex slab • lamina planes • bundling + thalamocortical emphasis</div>
+                    </div>
+                    <div class="pill mono">step @_stepIndex</div>
+                </header>
 
-            <div class="row actions" style="flex-wrap:wrap;">
-                <button class="btn" @onclick="() => Step(1)">Step 1</button>
-                <button class="btn" @onclick="() => Step(8)">Step 8</button>
-                <button class="btn" @onclick="() => Step(16)">Step 16</button>
-                <button class="btn" @onclick="() => Step(64)">Step 64</button>
-                <button class="btn" @onclick="() => Step(128)">Step 128</button>
-            </div>
+                <Network3D Snapshot="_snapshot" View="_view" HeightPx="520" />
 
-            <div class="row" style="margin-top:0.75rem;">
-                <button class="btn" @onclick="SleepReplay">Sleep (gated)</button>
-                <div class="spacer"></div>
-                <div class="mono small">@Api.LastResolvedSnapshotPath</div>
-            </div>
+                <div class="note mono small">@Api.LastResolvedSnapshotPath</div>
+            </section>
+        </main>
 
-            @if (!string.IsNullOrWhiteSpace(Api.LastError))
-            {
-                <div class="err small" style="margin-top:0.5rem;">@Api.LastError</div>
-            }
-        </section>
-    </section>
-
-    <section class="card">
-        <header class="card-h">
-            <div>
-                <div class="h-title">3D Network</div>
-                <div class="h-sub">Cortex slab • lamina • regions • minicolumn banding</div>
-            </div>
-            <div class="pill mono">step @_stepIndex</div>
-        </header>
-
-        <Network3D Snapshot="_snapshot" View="_view" HeightPx="520" />
-
-        <details style="margin-top:0.75rem;">
-            <summary class="mono" style="cursor:pointer;">Visual controls</summary>
-
-            <div class="form" style="margin-top:0.75rem;">
-                <label class="lbl">Spacing XY</label>
-                <input class="input" type="number" step="0.05" @bind="_view.SpacingXY" />
-
-                <label class="lbl">Z Scale</label>
-                <input class="input" type="number" step="0.05" @bind="_view.ZScale" />
-
-                <label class="lbl">Node Size</label>
-                <input class="input" type="number" step="0.01" @bind="_view.NodeSize" />
-
-                <label class="lbl">Node Opacity</label>
-                <input class="input" type="number" step="0.05" @bind="_view.NodeOpacity" />
-
-                <label class="lbl">Edge Soft Fade Len</label>
-                <input class="input" type="number" step="0.1" @bind="_view.EdgeSoftFadeLen" />
-
-                <label class="lbl">Edge Hard Cull Len</label>
-                <input class="input" type="number" step="0.1" @bind="_view.EdgeHardCullLen" />
-
-                <label class="lbl">Edge Opacity</label>
-                <input class="input" type="number" step="0.05" @bind="_view.EdgeOpacity" />
-
-                <label class="lbl">Fog Density</label>
-                <input class="input" type="number" step="0.001" @bind="_view.FogDensity" />
-
-                <div class="row" style="margin-top:0.5rem; flex-wrap:wrap;">
-                    <label class="chk">
-                        <input type="checkbox" @bind="_view.ShowLaminarPlanes" />
-                        <span>Laminar planes</span>
-                    </label>
-
-                    <label class="chk">
-                        <input type="checkbox" @bind="_view.ShowGrid" />
-                        <span>Grid</span>
-                    </label>
-
-                    <label class="chk">
-                        <input type="checkbox" @bind="_view.ShowAxes" />
-                        <span>Axes</span>
-                    </label>
-
-                    <label class="chk">
-                        <input type="checkbox" @bind="_view.EnableFog" />
-                        <span>Fog</span>
-                    </label>
+        <aside class="sidebar" aria-label="Controls">
+            <div class="sidebar-card">
+                <div class="tabs" role="tablist" aria-label="Control tabs">
+                    <button class="tab @TabClass("run")" type="button" role="tab" aria-selected="@IsTab("run")" aria-controls="panel-run" @onclick='() => SelectTab("run")'>Run</button>
+                    <button class="tab @TabClass("manual")" type="button" role="tab" aria-selected="@IsTab("manual")" aria-controls="panel-manual" @onclick='() => SelectTab("manual")'>Manual</button>
+                    <button class="tab @TabClass("snapshot")" type="button" role="tab" aria-selected="@IsTab("snapshot")" aria-controls="panel-snapshot" @onclick='() => SelectTab("snapshot")'>Snapshot</button>
+                    <button class="tab @TabClass("idle")" type="button" role="tab" aria-selected="@IsTab("idle")" aria-controls="panel-idle" @onclick='() => SelectTab("idle")'>IdleDrive</button>
+                    <button class="tab @TabClass("view")" type="button" role="tab" aria-selected="@IsTab("view")" aria-controls="panel-view" @onclick='() => SelectTab("view")'>View</button>
                 </div>
 
-                <hr style="grid-column: 1 / -1; opacity:0.15;" />
+                <div class="tabpanes">
+                    <section id="panel-run" class="tabpane" role="tabpanel" hidden="@(!IsTab("run"))">
+                        <div class="section-title">Run (Real-Time)</div>
+                        <div class="section-sub">Background stepping loop hosted by the API</div>
 
-                <label class="lbl">Regions</label>
-                <div class="row">
-                    <input type="checkbox" @bind="_view.EnableRegions" />
-                    <span class="muted">Cortex / Thalamus core / Nuclei clusters (inferred)</span>
+                        <div class="form">
+                            <label class="lbl">Target Hz</label>
+                            <input class="input" type="number" min="1" max="240" @bind="_runHz" />
+
+                            <label class="lbl">Steps / Tick</label>
+                            <input class="input" type="number" min="1" max="4096" @bind="_runStepsPerTick" />
+
+                            <label class="lbl">Poll ms (UI)</label>
+                            <input class="input" type="number" min="16" max="2000" @bind="_pollMs" />
+
+                            <label class="lbl">Auto-poll</label>
+                            <label class="chk">
+                                <input type="checkbox" @bind="_autoPoll" />
+                                <span class="muted">Update snapshot on timer</span>
+                            </label>
+                        </div>
+
+                        <div class="actions">
+                            <button class="btn" @onclick="StartRunner">Start</button>
+                            <button class="btn ghost" @onclick="StopRunner">Stop</button>
+                            <div class="spacer"></div>
+                            <button class="btn ghost" @onclick="Refresh">Refresh</button>
+                        </div>
+
+                        @if (_runStatus is not null)
+                        {
+                            <div class="mono small" style="margin-top:0.65rem; opacity:0.9;">
+                                ticks=@_runStatus.Ticks • hz=@_runStatus.TargetHz • steps/tick=@_runStatus.StepsPerTick
+                                @if (!string.IsNullOrWhiteSpace(_runStatus.LastError))
+                                {
+                                    <div class="err small">runner error: @_runStatus.LastError</div>
+                                }
+                            </div>
+                        }
+
+                        @if (!string.IsNullOrWhiteSpace(Api.LastError))
+                        {
+                            <div class="err small" style="margin-top:0.5rem;">@Api.LastError</div>
+                        }
+                    </section>
+
+                    <section id="panel-manual" class="tabpane" role="tabpanel" hidden="@(!IsTab("manual"))">
+                        <div class="section-title">Manual</div>
+                        <div class="section-sub">One-shot stepping (works even if runner is stopped)</div>
+
+                        <div class="actions" style="flex-wrap:wrap;">
+                            <button class="btn" @onclick="() => Step(1)">Step 1</button>
+                            <button class="btn" @onclick="() => Step(8)">Step 8</button>
+                            <button class="btn" @onclick="() => Step(16)">Step 16</button>
+                            <button class="btn" @onclick="() => Step(64)">Step 64</button>
+                            <button class="btn" @onclick="() => Step(128)">Step 128</button>
+                        </div>
+
+                        <div class="actions" style="margin-top:0.65rem;">
+                            <button class="btn" @onclick="SleepReplay">Sleep (gated)</button>
+                            <div class="spacer"></div>
+                            <button class="btn ghost" @onclick="Refresh">Refresh</button>
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(Api.LastError))
+                        {
+                            <div class="err small" style="margin-top:0.5rem;">@Api.LastError</div>
+                        }
+                    </section>
+
+                    <section id="panel-snapshot" class="tabpane" role="tabpanel" hidden="@(!IsTab("snapshot"))">
+                        <div class="section-title">Snapshot Mode</div>
+                        <div class="section-sub">Thin snapshots prevent UI timeouts on large lattices</div>
+
+                        <div class="form">
+                            <label class="lbl">Thin snapshots</label>
+                            <label class="chk">
+                                <input type="checkbox" @bind="_thinSnapshots" />
+                                <span class="muted">Cap edges + cull by length</span>
+                            </label>
+
+                            <label class="lbl">Max edges</label>
+                            <input class="input" type="number" min="1000" max="200000" step="1000" @bind="_thinMaxEdges" />
+
+                            <label class="lbl">Max edge len</label>
+                            <input class="input" type="number" min="1" max="50" step="0.5" @bind="_thinMaxLen" />
+                        </div>
+
+                        <div class="actions">
+                            <button class="btn" @onclick="ApplySnapshotModeClicked">Apply</button>
+                            <div class="spacer"></div>
+                            <div class="pill mono">@(_thinSnapshots ? "THIN" : "FULL")</div>
+                        </div>
+                    </section>
+
+                    <section id="panel-idle" class="tabpane" role="tabpanel" hidden="@(!IsTab("idle"))">
+                        <div class="section-title">Engine IdleDrive</div>
+                        <div class="section-sub">Engine-side background drive (noise + oscillation + micro-bursts)</div>
+
+                        <div class="form">
+                            <label class="lbl">Enabled</label>
+                            <label class="chk">
+                                <input type="checkbox" @bind="_idle.Enabled" />
+                                <span class="muted">Applies on next tick</span>
+                            </label>
+
+                            <label class="lbl">Baseline</label>
+                            <input class="input" type="number" step="0.001" @bind="_idle.BaselineExc" />
+
+                            <label class="lbl">Noise σ</label>
+                            <input class="input" type="number" step="0.001" @bind="_idle.NoiseSigma" />
+
+                            <label class="lbl">Osc Amp</label>
+                            <input class="input" type="number" step="0.001" @bind="_idle.OscAmplitude" />
+
+                            <label class="lbl">Osc Hz</label>
+                            <input class="input" type="number" step="0.01" @bind="_idle.OscHz" />
+
+                            <label class="lbl">Burst prob/tick</label>
+                            <input class="input" type="number" step="0.001" @bind="_idle.BurstProbability" />
+
+                            <label class="lbl">Burst amp</label>
+                            <input class="input" type="number" step="0.001" @bind="_idle.BurstAmplitude" />
+
+                            <label class="lbl">Burst radius</label>
+                            <input class="input" type="number" step="0.25" @bind="_idle.BurstRadius" />
+
+                            <label class="lbl">Cortex boost</label>
+                            <input class="input" type="number" step="0.01" @bind="_idle.CortexBoost" />
+
+                            <label class="lbl">Thalamus boost</label>
+                            <input class="input" type="number" step="0.01" @bind="_idle.ThalamusBoost" />
+
+                            <label class="lbl">Nuclei boost</label>
+                            <input class="input" type="number" step="0.01" @bind="_idle.NucleiBoost" />
+                        </div>
+
+                        <div class="actions">
+                            <button class="btn" @onclick="ApplyIdleDrive">Apply IdleDrive</button>
+                            <div class="spacer"></div>
+                            <button class="btn ghost" @onclick="Refresh">Refresh</button>
+                        </div>
+
+                        @if (!string.IsNullOrWhiteSpace(Api.LastError))
+                        {
+                            <div class="err small" style="margin-top:0.5rem;">@Api.LastError</div>
+                        }
+                    </section>
+
+                    <section id="panel-view" class="tabpane" role="tabpanel" hidden="@(!IsTab("view"))">
+                        <div class="section-title">Visual</div>
+                        <div class="section-sub">Renderer controls (local UI only)</div>
+
+                        <div class="form">
+                            <label class="lbl">Spacing XY</label>
+                            <input class="input" type="number" step="0.05" @bind="_view.SpacingXY" />
+
+                            <label class="lbl">Z Scale</label>
+                            <input class="input" type="number" step="0.05" @bind="_view.ZScale" />
+
+                            <label class="lbl">Node Size</label>
+                            <input class="input" type="number" step="0.01" @bind="_view.NodeSize" />
+
+                            <label class="lbl">Node Opacity</label>
+                            <input class="input" type="number" step="0.05" @bind="_view.NodeOpacity" />
+
+                            <label class="lbl">Edge Soft Fade Len</label>
+                            <input class="input" type="number" step="0.1" @bind="_view.EdgeSoftFadeLen" />
+
+                            <label class="lbl">Edge Hard Cull Len</label>
+                            <input class="input" type="number" step="0.1" @bind="_view.EdgeHardCullLen" />
+
+                            <label class="lbl">Edge Opacity</label>
+                            <input class="input" type="number" step="0.05" min="0" max="1" @bind="_view.EdgeOpacity" />
+
+                            <label class="lbl">Fog Density</label>
+                            <input class="input" type="number" step="0.001" @bind="_view.FogDensity" />
+
+                            <label class="lbl">Bundling strength</label>
+                            <input class="input" type="number" step="0.05" @bind="_view.BundlingStrength" />
+
+                            <label class="lbl">Highlight thal projections</label>
+                            <label class="chk">
+                                <input type="checkbox" @bind="_view.HighlightThalProjection" />
+                                <span class="muted">Thalamus → cortex emphasis</span>
+                            </label>
+
+                            <label class="lbl">Thal projection boost</label>
+                            <input class="input" type="number" step="0.1" @bind="_view.ThalProjectionBoost" />
+                        </div>
+
+                        <div class="toggles">
+                            <label class="chk">
+                                <input type="checkbox" @bind="_view.ShowLaminarPlanes" />
+                                <span>Laminar planes</span>
+                            </label>
+
+                            <label class="chk">
+                                <input type="checkbox" @bind="_view.ShowGrid" />
+                                <span>Grid</span>
+                            </label>
+
+                            <label class="chk">
+                                <input type="checkbox" @bind="_view.ShowAxes" />
+                                <span>Axes</span>
+                            </label>
+
+                            <label class="chk">
+                                <input type="checkbox" @bind="_view.EnableFog" />
+                                <span>Fog</span>
+                            </label>
+                        </div>
+
+                        <div class="actions">
+                            <button class="btn ghost" @onclick="Refresh">Refresh Snapshot</button>
+                        </div>
+                    </section>
                 </div>
-
-                <label class="lbl">Thalamus Radius XY</label>
-                <input class="input" type="number" step="0.01" min="0.05" max="0.70" @bind="_view.ThalamusRadiusXY" />
-
-                <label class="lbl">Thalamus Radius Z</label>
-                <input class="input" type="number" step="0.01" min="0.05" max="0.90" @bind="_view.ThalamusRadiusZ" />
-
-                <label class="lbl">Nuclei Count</label>
-                <input class="input" type="number" min="0" max="24" @bind="_view.NucleiCount" />
-
-                <label class="lbl">Nuclei Radius</label>
-                <input class="input" type="number" step="0.01" min="0.03" max="0.40" @bind="_view.NucleiRadius" />
-
-                <label class="lbl">Column Banding</label>
-                <div class="row">
-                    <input type="checkbox" @bind="_view.EnableColumnBanding" />
-                    <span class="muted">Alternating stripes to suggest minicolumns</span>
-                </div>
-
-                <label class="lbl">Band Period</label>
-                <input class="input" type="number" min="1" max="8" @bind="_view.ColumnBandPeriod" />
-
-                <label class="lbl">Band Strength</label>
-                <input class="input" type="number" step="0.01" min="0.00" max="0.50" @bind="_view.ColumnBandStrength" />
             </div>
-        </details>
-    </section>
+        </aside>
+    </div>
 </div>
 
 @code {
@@ -230,6 +288,8 @@
     private string _apiError = "";
 
     private RunStatusDto? _runStatus;
+
+    private string _activeTab = "run";
 
     private int _runHz = 30;
     private int _runStepsPerTick = 2;
@@ -246,6 +306,15 @@
     private int _thinMaxEdges = 12_000;
     private float _thinMaxLen = 7f;
 
+    // Engine-side IdleDrive controls
+    private IdleDriveConfigModel _idle = new();
+
+    private void SelectTab(string tab) => _activeTab = tab;
+
+    private bool IsTab(string tab) => string.Equals(_activeTab, tab, StringComparison.OrdinalIgnoreCase);
+
+    private string TabClass(string tab) => IsTab(tab) ? "active" : "";
+
     protected override async Task OnInitializedAsync()
     {
         ApplySnapshotMode();
@@ -260,6 +329,18 @@
         Api.UseThinSnapshot = _thinSnapshots;
         Api.ThinMaxEdges = _thinMaxEdges;
         Api.ThinMaxLen = _thinMaxLen;
+    }
+
+    private async Task ApplySnapshotModeClicked()
+    {
+        ApplySnapshotMode();
+        await Refresh();
+    }
+
+    private async Task ApplyIdleDrive()
+    {
+        await Api.SetIdleDrive(_idle);
+        await Refresh();
     }
 
     private async Task Refresh()
@@ -396,10 +477,12 @@
     .h1 {
         font-size: 1.6rem;
         font-weight: 700;
+        letter-spacing: 0.25px;
     }
 
     .sub {
         opacity: 0.75;
+        font-size: 0.95rem;
     }
 
     .status {
@@ -409,47 +492,12 @@
         justify-content: flex-end;
     }
 
-    .grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 1rem;
-        margin-bottom: 1rem;
-    }
-    @@media (max-width: 1100px) {
-        .grid {
-            grid-template-columns: 1fr;
-        }
-    }
-
-    .card {
-        border: 1px solid rgba(255,255,255,0.12);
-        border-radius: 14px;
-        padding: 0.85rem;
-        background: rgba(0,0,0,0.22);
-    }
-
-    .card-h {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-start;
-        gap: 1rem;
-        margin-bottom: 0.6rem;
-    }
-
-    .h-title {
-        font-weight: 650;
-    }
-
-    .h-sub {
-        opacity: 0.75;
-        font-size: 0.92rem;
-    }
-
     .pill {
         padding: 0.25rem 0.6rem;
         border-radius: 999px;
         border: 1px solid rgba(255,255,255,0.18);
         font-size: 0.85rem;
+        background: rgba(0,0,0,0.20);
     }
 
     .mono {
@@ -460,18 +508,121 @@
         font-size: 0.86rem;
     }
 
-    .err {
-        color: #ffb3b3;
-        font-weight: 600;
+    .note {
+        margin-top: 0.65rem;
+        opacity: 0.75;
     }
 
-    .muted {
-        opacity: 0.70;
+    .err {
+        color: #ffb4b4;
+        opacity: 0.95;
+        font-size: 0.92rem;
+        white-space: pre-wrap;
+        word-break: break-word;
+        text-align: right;
+    }
+
+    .card {
+        border: 1px solid rgba(255,255,255,0.12);
+        border-radius: 14px;
+        padding: 0.85rem;
+        background: rgba(0,0,0,0.22);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    }
+
+    .card-h {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 1rem;
+        margin-bottom: 0.75rem;
+    }
+
+    .h-title {
+        font-weight: 650;
+        font-size: 1.05rem;
+    }
+
+    .h-sub {
+        opacity: 0.75;
+        font-size: 0.92rem;
+    }
+
+    .content-grid {
+        display: grid;
+        grid-template-columns: 1fr 420px;
+        gap: 1rem;
+        align-items: start;
+    }
+
+    .main {
+        min-width: 0;
+    }
+
+    .sidebar {
+        position: sticky;
+        top: 1rem;
+        align-self: start;
+        min-width: 0;
+    }
+
+    .sidebar-card {
+        border-radius: 16px;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(0,0,0,0.22);
+        box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+        overflow: hidden;
+    }
+
+    .tabs {
+        display: flex;
+        gap: 0.25rem;
+        padding: 0.5rem;
+        border-bottom: 1px solid rgba(255,255,255,0.10);
+        background: rgba(0,0,0,0.25);
+        overflow-x: auto;
+    }
+
+    .tab {
+        appearance: none;
+        border: 1px solid rgba(255,255,255,0.12);
+        background: rgba(255,255,255,0.06);
+        color: inherit;
+        padding: 0.4rem 0.6rem;
+        border-radius: 12px;
+        font-size: 0.9rem;
+        cursor: pointer;
+        white-space: nowrap;
+        flex: 0 0 auto;
+    }
+
+        .tab.active {
+            border-color: rgba(255,255,255,0.28);
+            background: rgba(255,255,255,0.12);
+        }
+
+    .tabpanes {
+        padding: 0.75rem;
+    }
+
+    .tabpane {
+        min-width: 0;
+    }
+
+    .section-title {
+        font-weight: 650;
+        margin-bottom: 0.1rem;
+    }
+
+    .section-sub {
+        opacity: 0.75;
+        font-size: 0.92rem;
+        margin-bottom: 0.65rem;
     }
 
     .form {
         display: grid;
-        grid-template-columns: 180px 1fr;
+        grid-template-columns: minmax(140px, 180px) minmax(0, 1fr);
         gap: 0.5rem 0.75rem;
         align-items: center;
     }
@@ -482,6 +633,8 @@
 
     .input {
         width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
         padding: 0.35rem 0.5rem;
         border-radius: 10px;
         border: 1px solid rgba(255,255,255,0.18);
@@ -489,31 +642,33 @@
         color: inherit;
     }
 
-    .row {
-        display: flex;
-        gap: 0.75rem;
-        align-items: center;
-    }
-
     .actions {
         margin-top: 0.75rem;
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
     }
 
     .btn {
-        padding: 0.45rem 0.8rem;
-        border-radius: 12px;
         border: 1px solid rgba(255,255,255,0.18);
-        background: rgba(255,255,255,0.06);
+        background: rgba(255,255,255,0.10);
         color: inherit;
+        padding: 0.45rem 0.7rem;
+        border-radius: 12px;
         cursor: pointer;
     }
 
-        .btn:hover {
-            background: rgba(255,255,255,0.10);
+        .btn.ghost {
+            background: rgba(0,0,0,0.0);
         }
 
     .spacer {
         flex: 1;
+    }
+
+    .muted {
+        opacity: 0.75;
     }
 
     .chk {
@@ -523,5 +678,22 @@
         padding: 0.25rem 0.4rem;
         border-radius: 10px;
         border: 1px solid rgba(255,255,255,0.10);
+    }
+
+    .toggles {
+        margin-top: 0.75rem;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    @@media (max-width: 1100px) {
+        .content-grid {
+            grid-template-columns: 1fr;
+        }
+
+        .sidebar {
+            position: static;
+        }
     }
 </style>

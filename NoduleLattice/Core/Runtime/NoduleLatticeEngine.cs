@@ -4,10 +4,12 @@
 //   Canon engine with:
 //     - Parallel stepping path (enableParallel=true)
 //     - StepAsync for API/background runner usage
-//     - Preserves existing archive Save/Load format (NO ArchiveEngine dependency)
+//     - Canonical archive Save/Load (IArchiveStore) via byte[] / ReadOnlySpan<byte>
+//     - Snapshot builder via Core.Runtime.Snapshots.LatticeSnapshot / NodeSnap / EdgeSnap (canon)
+//     - Hippocampus episodic memory (capture + recall injection)
 // NOTES:
-//   StructuralTick stays single-threaded.
-//   ReplayBuffer pushes are kept sequential for safety.
+//   - Hippocampus is Core structure.
+//   - Hippocampus not persisted in archive (by design, for now).
 // ============================================================================
 
 using System;
@@ -22,7 +24,10 @@ using NoduleLattice.Abstractions.Modulation;
 using NoduleLattice.Abstractions.Nodes;
 using NoduleLattice.Abstractions.Synapses;
 using NoduleLattice.Abstractions.Time;
+using NoduleLattice.Core.Determinism;
 using NoduleLattice.Core.Modulation;
+using NoduleLattice.Core.Runtime.Hippocampus;
+using NoduleLattice.Core.Runtime.IdleDrive;
 using NoduleLattice.Core.Runtime.Sleep;
 using NoduleLattice.Core.Runtime.Snapshots;
 using NoduleLattice.Core.Spatial;
@@ -39,6 +44,10 @@ public sealed class NoduleLatticeEngine : IArchiveStore
     private readonly MembraneIntegrator _membrane;
     private readonly DemandEstimator _demand;
     private readonly UtilityProbe _probe;
+
+    // IdleDrive (intrinsic excitation/noise)
+    private IdleDriveConfig _idleDrive = IdleDriveConfig.Disabled;
+    private readonly DeterministicRng _idleRng;
 
     private readonly SpatialIndex3D _spatial = new();
 
@@ -61,6 +70,9 @@ public sealed class NoduleLatticeEngine : IArchiveStore
     // sleep replay
     private readonly SleepReplayConfig _sleep;
     private readonly ReplayBuffer _replay;
+
+    // hippocampus (episodic memory)
+    private readonly HippocampusMemory _hippocampus;
 
     // Parallel controls
     private readonly bool _enableParallel;
@@ -88,12 +100,19 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         _demand = demand;
         _probe = probe;
 
+        // Dedicated deterministic RNG for idle drive.
+        // Seeded from topology RNG once to stay run-to-run deterministic without
+        // perturbing topology RNG on every step.
+        _idleRng = new DeterministicRng(_topology.Rng.NextU());
+
         _structuralPeriodSteps = Math.Max(1, structuralPeriodSteps);
         _maxDelay = Math.Max(0, maxDelaySteps);
 
         _sleep = sleep ?? new SleepReplayConfig();
         _replay = new ReplayBuffer(_sleep.HistorySteps);
         _replay.Reset(Array.Empty<NoduleId>());
+
+        _hippocampus = new HippocampusMemory(new HippocampusConfig());
 
         _enableParallel = enableParallel;
         _maxDegree = Math.Max(1, maxDegreeOfParallelism ?? Environment.ProcessorCount);
@@ -103,6 +122,27 @@ public sealed class NoduleLatticeEngine : IArchiveStore
     public long StepIndex => _time.StepIndex;
 
     public void SetModulators(ModulatorVector v) => _field.Set(v);
+
+    // ------------------------------------------------------------------------
+    // IdleDrive public surface (Core-only)
+    // ------------------------------------------------------------------------
+
+    public void SetIdleDriveConfig(IdleDriveConfig cfg) => _idleDrive = cfg ?? IdleDriveConfig.Disabled;
+
+    public IdleDriveConfig GetIdleDriveConfig() => _idleDrive;
+
+    // ------------------------------------------------------------------------
+    // Hippocampus public surface (Core-only)
+    // ------------------------------------------------------------------------
+
+    public void SetHippocampusConfig(HippocampusConfig cfg) => _hippocampus.SetConfig(cfg);
+
+    public HippocampusStats GetHippocampusStats() => _hippocampus.GetStats(_time.StepIndex);
+
+    public void HippocampusRecallInject(int episodes = 1, float gain = 0.6f)
+        => _hippocampus.RecallInject(this, _time.StepIndex, episodes, gain);
+
+    // ------------------------------------------------------------------------
 
     public void AddNode(INodule node)
     {
@@ -148,6 +188,9 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         _probationOutputs.Clear();
         _time.Reset(0);
         _replay.Reset(Array.Empty<NoduleId>());
+
+        // Align to “new brain”: clear episodic memory.
+        _hippocampus.ClearAll();
     }
 
     public void InjectInput(NoduleId target, float signalExc, float signalInh = 0f)
@@ -158,6 +201,38 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             a.InhSum += signalInh;
         }
     }
+
+    // ------------------------------------------------------------------------
+    // IdleDrive injection (intrinsic excitation/noise)
+    // ------------------------------------------------------------------------
+
+    private void ApplyIdleDrive()
+    {
+        if (!_idleDrive.Enabled) return;
+        if (_idleDrive.Probability <= 0f) return;
+        if (_idleDrive.Amplitude <= 0f) return;
+        if (_nodes.Count == 0) return;
+
+        float p = Clamp01(_idleDrive.Probability);
+        float amp = MathF.Abs(_idleDrive.Amplitude);
+        float inhBias = Clamp01(_idleDrive.InhibitoryBias);
+
+        // Deterministic iteration order (independent of Dictionary enumeration)
+        foreach (var id in _nodes.Keys.OrderBy(k => k.Value))
+        {
+            if (_idleRng.NextFloat01() > p) continue;
+
+            bool inhibitory = _idleRng.NextFloat01() < inhBias;
+            float mag = _idleRng.NextFloat01() * amp;
+
+            if (!_acc.TryGetValue(id, out var acc)) continue;
+
+            if (inhibitory) acc.InhSum += mag;
+            else acc.ExcSum += mag;
+        }
+    }
+
+    private static float Clamp01(float v) => v < 0f ? 0f : (v > 1f ? 1f : v);
 
     public void Step(int steps = 1)
     {
@@ -216,7 +291,7 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         }
     }
 
-    // ------------------------ Sequential (kept) ------------------------
+    // ------------------------ Sequential ------------------------
 
     private void StepOneSequential()
     {
@@ -228,6 +303,8 @@ public sealed class NoduleLatticeEngine : IArchiveStore
 
             _acc[n.Id].Reset();
         }
+
+        ApplyIdleDrive();
 
         var perNodeMod = new Dictionary<NoduleId, ModulatorVector>(_nodes.Count);
         foreach (var n in _nodes.Values)
@@ -295,6 +372,9 @@ public sealed class NoduleLatticeEngine : IArchiveStore
 
         _probe.ObserveStep(view, _topology, id => perNodeMod[id], _probationOutputs);
 
+        // Hippocampus capture at the end of the step, before time advance.
+        _hippocampus.MaybeStoreEpisode(_time.StepIndex, _nodes.Values.ToArray(), _field.Current);
+
         _time.Advance();
 
         foreach (var n in _nodes.Values)
@@ -335,6 +415,8 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             n.Activity = act;
             _acc[n.Id].Reset();
         });
+
+        ApplyIdleDrive();
 
         // Per-node modulators
         var perNodeModArr = new ModulatorVector[maxNodeId + 1];
@@ -393,22 +475,20 @@ public sealed class NoduleLatticeEngine : IArchiveStore
                 ih += localInh[r][post];
             }
 
-            if (ex != 0f || ih != 0f)
+            var id = new NoduleId(post);
+            if (_acc.TryGetValue(id, out var a))
             {
-                var id = new NoduleId(post);
-                if (_acc.TryGetValue(id, out var a))
-                {
-                    a.ExcSum += ex;
-                    a.InhSum += ih;
-                }
+                a.ExcSum += ex;
+                a.InhSum += ih;
             }
         }
 
-        for (int r = 0; r < ranges.Length; r++)
-            foreach (var kv in localProb[r])
-                _probationOutputs[kv.Key] = kv.Value;
+        // Merge probation outputs
+        foreach (var d in localProb)
+            foreach (var kvp in d)
+                _probationOutputs[kvp.Key] = kvp.Value;
 
-        // Phase 4 integrate membranes
+        // Phase 2 integrate
         Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
         {
             var n = nodeArr[i];
@@ -417,76 +497,66 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             n.Membrane = m;
         });
 
-        // Phase 5 emit spikes
-        long stepIdx = _time.StepIndex;
+        // Phase 3 emit
         Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
         {
             var n = nodeArr[i];
             var m = n.Membrane;
             var a = n.Activity;
-            _membrane.Emit(stepIdx, ref m, ref a);
+            _membrane.Emit(_time.StepIndex, ref m, ref a);
             n.Membrane = m;
             n.Activity = a;
         });
 
-        // Phase 3 synapse fast state
-        Parallel.For(0, ranges.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, r =>
+        // Phase 4 advance fast state
+        Parallel.For(0, synArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
         {
-            var (start, end) = ranges[r];
-            for (int i = start; i < end; i++)
-            {
-                var syn = synArr[i];
-                var preAct = GetDelayedActivity(syn.Pre, syn.DelaySteps);
-                var postAct = _nodes[syn.Post].Activity;
-                syn.AdvanceFastState(preAct, postAct);
-            }
+            var syn = synArr[i];
+            var preAct = GetDelayedActivity(syn.Pre, syn.DelaySteps);
+            var postAct = _nodes[syn.Post].Activity;
+            syn.AdvanceFastState(preAct, postAct);
         });
 
-        // Phase 6 consolidate
-        Parallel.For(0, ranges.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, r =>
+        // Phase 5 consolidate
+        Parallel.For(0, synArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
         {
-            var (start, end) = ranges[r];
-            for (int i = start; i < end; i++)
-            {
-                var syn = synArr[i];
-                var m = perNodeModArr[syn.Post.Value];
-                syn.Consolidate(m);
-            }
+            var syn = synArr[i];
+            var m = perNodeModArr[syn.Post.Value];
+            syn.Consolidate(m);
         });
 
-        // Phase 7 slow hooks + growth requests
-        Parallel.For(0, ranges.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, r =>
+        // Phase 6 slow hooks + growth
+        var growth = new List<SynapseGrowthRequest>();
+        for (int i = 0; i < synArr.Length; i++)
         {
-            var (start, end) = ranges[r];
-            for (int i = start; i < end; i++)
-            {
-                var syn = synArr[i];
-                var m = perNodeModArr[syn.Post.Value];
-                var demand = _demand.Estimate(m);
-                syn.SlowHooks(m, demand);
+            var syn = synArr[i];
+            var m = perNodeModArr[syn.Post.Value];
+            var demand = _demand.Estimate(m);
+            syn.SlowHooks(m, demand);
 
-                var req = syn.ConsiderGrowthRequest(m);
-                if (req.HasValue)
-                    _topology.EnqueueGrowthRequest(req.Value);
-            }
-        });
+            var req = syn.ConsiderGrowthRequest(m);
+            if (req.HasValue)
+                growth.Add(req.Value);
+        }
 
-        // Observe + advance
-        var all = synArr.ToList();
+        for (int i = 0; i < growth.Count; i++)
+            _topology.EnqueueGrowthRequest(growth[i]);
+
+        var all = _synapses.Values.ToList();
         var view = new TopologyView(_time.StepIndex, _nodes, _incoming, _outgoing, all, _spatial);
+
         _probe.ObserveStep(view, _topology, id => perNodeModArr[id.Value], _probationOutputs);
+
+        _hippocampus.MaybeStoreEpisode(_time.StepIndex, nodeArr, _field.Current);
 
         _time.Advance();
 
-        // Delay buffers can be parallel, replay push sequential
-        Parallel.For(0, nodeArr.Length, new ParallelOptions { MaxDegreeOfParallelism = _maxDegree }, i =>
+        for (int i = 0; i < nodeArr.Length; i++)
         {
             var n = nodeArr[i];
             PushActivityDelay(n.Id, n.Activity);
-        });
-
-        foreach (var n in nodeArr)
             _replay.Push(n.Id, n.Activity.Rate);
+        }
 
         _replay.AdvanceStep();
 
@@ -494,20 +564,19 @@ public sealed class NoduleLatticeEngine : IArchiveStore
             StructuralTick();
     }
 
-    private static (int start, int end)[] BuildRanges(int length, int chunkSize)
+    private static (int start, int end)[] BuildRanges(int len, int chunk)
     {
-        if (length <= 0) return Array.Empty<(int, int)>();
+        if (len <= 0) return Array.Empty<(int, int)>();
+        if (chunk <= 0) chunk = len;
 
-        int chunks = (length + chunkSize - 1) / chunkSize;
-        var ranges = new (int start, int end)[chunks];
+        int count = (len + chunk - 1) / chunk;
+        var ranges = new (int start, int end)[count];
 
         int idx = 0;
-        for (int c = 0; c < chunks; c++)
+        for (int start = 0; start < len; start += chunk)
         {
-            int start = idx;
-            int end = Math.Min(length, start + chunkSize);
-            ranges[c] = (start, end);
-            idx = end;
+            int end = Math.Min(len, start + chunk);
+            ranges[idx++] = (start, end);
         }
 
         return ranges;
@@ -528,59 +597,60 @@ public sealed class NoduleLatticeEngine : IArchiveStore
 
         foreach (var fb in _topology.ConsumePendingFeedback())
         {
-            if (_synapses.TryGetValue(fb.SourceSynapse, out var source))
-                source.ApplyGrowthFeedback(fb);
+            if (_synapses.TryGetValue(fb.SourceSynapse, out var src))
+                src.ApplyGrowthFeedback(fb);
         }
     }
 
-    private NodeActivity GetDelayedActivity(NoduleId id, int delay)
+    private NodeActivity GetDelayedActivity(NoduleId id, int delaySteps)
     {
-        if (_maxDelay == 0) return _nodes[id].Activity;
-        delay = Math.Clamp(delay, 0, _maxDelay);
-        return _activityDelay[id][delay];
+        if (!_activityDelay.TryGetValue(id, out var buf)) return default;
+
+        delaySteps = Math.Clamp(delaySteps, 0, _maxDelay);
+        return buf[delaySteps];
     }
 
-    private void PushActivityDelay(NoduleId id, NodeActivity a)
+    private void PushActivityDelay(NoduleId id, NodeActivity act)
     {
-        var buf = _activityDelay[id];
-        for (int i = buf.Length - 1; i > 0; i--)
-            buf[i] = buf[i - 1];
-        buf[0] = a;
+        if (!_activityDelay.TryGetValue(id, out var buf)) return;
+
+        for (int d = _maxDelay; d >= 1; d--)
+            buf[d] = buf[d - 1];
+
+        buf[0] = act;
     }
 
-    public LatticeSnapshot GetSnapshot()
-    {
-        var snap = new LatticeSnapshot { StepIndex = _time.StepIndex };
+    // ------------------------------------------------------------------------
+    // Snapshot builder (canon Core snapshot)
+    // ------------------------------------------------------------------------
 
-        foreach (var n in _nodes.Values)
+    public LatticeSnapshot BuildSnapshot()
+    {
+        return new LatticeSnapshot
         {
-            snap.Nodes.Add(new NodeSnap
+            StepIndex = _time.StepIndex,
+            Nodes = _nodes.Values.Select(n => new NodeSnap
             {
                 Id = n.Id.Value,
                 Pos = n.Position,
                 V = n.Membrane.Potential,
                 Rate = n.Activity.Rate,
                 Spiked = n.Activity.Spiked
-            });
-        }
-
-        foreach (var s in _synapses.Values)
-        {
-            snap.Synapses.Add(new EdgeSnap
+            }).ToList(),
+            Synapses = _synapses.Values.Select(s => new EdgeSnap
             {
                 Id = s.Id.Value,
                 Pre = s.Pre.Value,
                 Post = s.Post.Value,
                 W = s.Weight,
                 Kind = (int)s.Kind
-            });
-        }
-
-        return snap;
+            }).ToList()
+        };
     }
 
-    // ---- Canonical archive save/load ----
-    // Engine archive version: 3 (Entry 010). Entry 011 extends topology state internally (topology version 2).
+    // ------------------------------------------------------------------------
+    // Canonical archive save/load (aligned to your existing types)
+    // ------------------------------------------------------------------------
 
     public byte[] Save()
     {
@@ -638,6 +708,13 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         // Topology state
         bw.Write(true);
         _topology.WriteState(bw);
+
+        // IdleDrive config (optional tail for archive v3)
+        bw.Write(true);
+        bw.Write(_idleDrive.Enabled);
+        bw.Write(_idleDrive.Amplitude);
+        bw.Write(_idleDrive.Probability);
+        bw.Write(_idleDrive.InhibitoryBias);
 
         return ms.ToArray();
     }
@@ -709,6 +786,30 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         if (hasTopo)
             _topology.ReadState(br);
 
+        // IdleDrive optional tail
+        if (ms.Position < ms.Length)
+        {
+            bool hasIdle = br.ReadBoolean();
+            if (hasIdle)
+            {
+                _idleDrive = new IdleDriveConfig
+                {
+                    Enabled = br.ReadBoolean(),
+                    Amplitude = br.ReadSingle(),
+                    Probability = br.ReadSingle(),
+                    InhibitoryBias = br.ReadSingle()
+                };
+            }
+            else
+            {
+                _idleDrive = IdleDriveConfig.Disabled;
+            }
+        }
+        else
+        {
+            _idleDrive = IdleDriveConfig.Disabled;
+        }
+
         _time.Reset(step);
 
         foreach (var n in _nodes.Values)
@@ -718,5 +819,8 @@ public sealed class NoduleLatticeEngine : IArchiveStore
         }
 
         _replay.Reset(_nodes.Keys);
+
+        // Hippocampus: treat archive load as "fresh life" for episodic memory.
+        _hippocampus.ResetStats();
     }
 }

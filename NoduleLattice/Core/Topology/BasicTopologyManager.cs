@@ -25,6 +25,12 @@ public sealed class BasicTopologyManager : ITopologyManager, ITopologyManagerSer
         _rng = rng;
     }
 
+    /// <summary>
+    /// Canon: expose deterministic RNG for Core subsystems that must remain deterministic
+    /// (e.g., IdleDrive seeding) without depending on random sources outside Core.
+    /// </summary>
+    public DeterministicRng Rng => _rng;
+
     public void EnqueueGrowthRequest(in SynapseGrowthRequest request) => _queue.Add(request);
 
     public void RecordUtilitySample(SynapseId id, in UtilitySample sample)

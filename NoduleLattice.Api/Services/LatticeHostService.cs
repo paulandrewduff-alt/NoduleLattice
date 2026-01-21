@@ -1,15 +1,4 @@
-﻿// ============================================================================
-// FILE: NoduleLattice.Api/Services/LatticeHostService.cs
-// PURPOSE:
-//   - Owns single in-proc engine instance
-//   - Builds cortical slab + cortex-like wiring on Create()
-//   - Provides FULL snapshot and THIN snapshot (edge-capped + length-capped)
-// NOTES:
-//   Thin snapshot keeps *all nodes* but reduces edges for real-time UI.
-// ============================================================================
-
-using System.Collections.Concurrent;
-using NoduleLattice.Abstractions.Math;
+﻿using NoduleLattice.Abstractions.Math;
 using NoduleLattice.Abstractions.Modulation;
 using NoduleLattice.Abstractions.Nodes;
 using NoduleLattice.Abstractions.Synapses;
@@ -22,6 +11,19 @@ using NoduleLattice.Core.Runtime.Snapshots;
 using NoduleLattice.Core.Synapses;
 using NoduleLattice.Core.Time;
 using NoduleLattice.Core.Topology;
+using System.Collections.Concurrent;
+
+
+// ============================================================================
+// FILE: NoduleLattice.Api/Services/LatticeHostService.cs
+// PURPOSE:
+//   - Owns single in-proc engine instance
+//   - Builds cortical slab + cortex-like wiring on Create()
+//   - Provides FULL snapshot and THIN snapshot (edge-capped + length-capped)
+// NOTES:
+//   Thin snapshot keeps *all nodes* but reduces edges for real-time UI.
+// ============================================================================
+
 
 namespace NoduleLattice.Api.Services;
 
@@ -129,7 +131,7 @@ public sealed class LatticeHostService
 
             BuildDefaultGroups(sx, sy, sz);
 
-            return Map(_engine.GetSnapshot(), edgesOverride: null);
+            return Map(_engine.BuildSnapshot(), edgesOverride: null);
         }
     }
 
@@ -145,7 +147,7 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            return Map(_engine.GetSnapshot(), edgesOverride: null);
+            return Map(_engine.BuildSnapshot(), edgesOverride: null);
         }
     }
 
@@ -156,7 +158,7 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            var snap = _engine.GetSnapshot();
+            var snap = _engine.BuildSnapshot();
 
             // Ensure _posById is valid after archive loads (or any future rebuild)
             EnsurePosIndexFromSnapshot(snap);
@@ -285,7 +287,7 @@ public sealed class LatticeHostService
             _engine.Load(bytes);
 
             // rebuild groups and pos index
-            var snap = _engine.GetSnapshot();
+            var snap = _engine.BuildSnapshot();
             RebuildGroupsFromSnapshot(snap);
             EnsurePosIndexFromSnapshot(snap);
         }
@@ -295,7 +297,7 @@ public sealed class LatticeHostService
     {
         lock (_gate)
         {
-            var snap = _engine.GetSnapshot();
+            var snap = _engine.BuildSnapshot();
             var errors = new List<string>();
 
             if (snap.StepIndex < 0) errors.Add("StepIndex < 0");
@@ -600,3 +602,4 @@ public sealed class LatticeHostService
         };
     }
 }
+
