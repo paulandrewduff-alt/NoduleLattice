@@ -3,27 +3,15 @@ using NoduleLattice.Abstractions.Modulation;
 using NoduleLattice.Abstractions.Nodes;
 using NoduleLattice.Abstractions.Synapses;
 using NoduleLattice.Api.Dtos;
+using NoduleLattice.Core.Builders;
 using NoduleLattice.Core.Determinism;
 using NoduleLattice.Core.Modulation;
-using NoduleLattice.Core.Nodes;
 using NoduleLattice.Core.Runtime;
 using NoduleLattice.Core.Runtime.Snapshots;
 using NoduleLattice.Core.Synapses;
 using NoduleLattice.Core.Time;
 using NoduleLattice.Core.Topology;
 using System.Collections.Concurrent;
-
-
-// ============================================================================
-// FILE: NoduleLattice.Api/Services/LatticeHostService.cs
-// PURPOSE:
-//   - Owns single in-proc engine instance
-//   - Builds cortical slab + cortex-like wiring on Create()
-//   - Provides FULL snapshot and THIN snapshot (edge-capped + length-capped)
-// NOTES:
-//   Thin snapshot keeps *all nodes* but reduces edges for real-time UI.
-// ============================================================================
-
 
 namespace NoduleLattice.Api.Services;
 
@@ -97,31 +85,36 @@ public sealed class LatticeHostService
             _engine.ClearAll();
             _groups.Clear();
 
-            int sx = System.Math.Max(1, req.SizeX);
+            // ------------------------------------------------------------------
+            // Canon: hemispheres + corpus callosum are built by Core builders.
+            // API only orchestrates.
+            //
+            // Interpret req.SizeX as total width including an inter-hemispheric gap.
+            // We split into left/right as evenly as possible.
+            // ------------------------------------------------------------------
+
+            int totalX = System.Math.Max(4, req.SizeX);
             int sy = System.Math.Max(1, req.SizeY);
             int sz = System.Math.Max(1, req.SizeZ);
 
-            int nodeCount = sx * sy * sz;
-            _posById = new Int3[nodeCount + 1];
+            var cortex = BuildDefaultHemispheresConfig(totalX, sy, sz);
 
-            // Build cortical slab (wide XY, layered Z)
-            int id = 1;
-            for (int z = 0; z < sz; z++)
-                for (int y = 0; y < sy; y++)
-                    for (int x = 0; x < sx; x++)
-                    {
-                        var p = new Int3(x, y, z);
-                        _posById[id] = p;
+            // Build cortex nodes + corpus callosum synapses in Core
+            CortexHemisphereBuilder.Build(
+                engine: _engine,
+                cfg: cortex,
+                synCfg: _synCfg,
+                rng: _rng,
+                startingNodeId: 1,
+                startingSynapseId: _nextSynapseId);
 
-                        var node = new Nodule(new NoduleId(id), p);
-                        _engine.AddNode(node);
-                        id++;
-                    }
+            // Re-index positions from snapshot (supports gap + any future structures)
+            var snapAfterBuild = _engine.BuildSnapshot();
+            EnsurePosIndexFromSnapshot(snapAfterBuild);
 
-            SeedCortexConnectivity(
-                sx: sx,
-                sy: sy,
-                sz: sz,
+            // Local intra-hemisphere / laminar wiring (still orchestrated here)
+            // IMPORTANT: This must respect the inter-hemispheric gap.
+            SeedCortexConnectivitySparse(
                 totalSynapses: System.Math.Max(0, req.InitialSynapses),
                 localRadiusXY: System.Math.Max(1, req.LocalRadiusXY),
                 columnLinksPerNode: System.Math.Max(0, req.ColumnLinksPerNode),
@@ -129,7 +122,8 @@ public sealed class LatticeHostService
                 maxOutPerNode: System.Math.Max(1, req.MaxOutPerNode),
                 maxDelaySteps: System.Math.Max(1, req.MaxDelaySteps));
 
-            BuildDefaultGroups(sx, sy, sz);
+            // Groups by X-span across the built cortex (vision/audio/body thirds)
+            RebuildGroupsFromSnapshot(_engine.BuildSnapshot());
 
             return Map(_engine.BuildSnapshot(), edgesOverride: null);
         }
@@ -327,6 +321,36 @@ public sealed class LatticeHostService
         }
     }
 
+
+    // ------------------------ Cortex hemispheres bootstrap ------------------------
+
+    private static CortexHemispheresConfig BuildDefaultHemispheresConfig(int totalX, int heightY, int layersZ)
+    {
+        // A small default gap makes the separation visible without killing density.
+        const int gap = 2;
+
+        int usable = System.Math.Max(2, totalX - gap);
+        int left = usable / 2;
+        int right = usable - left;
+
+        return new CortexHemispheresConfig
+        {
+            LeftWidthX = System.Math.Max(1, left),
+            RightWidthX = System.Math.Max(1, right),
+            InterHemisphericGapX = gap,
+            HeightY = System.Math.Max(1, heightY),
+            LayersZ = System.Math.Max(1, layersZ),
+
+            EnableCorpusCallosum = true,
+            CallosumDensity = 0.35f,
+            CallosumBidirectional = true,
+            CallosumBaseWeight = 0.12f,
+            CallosumWeightJitter = 0.06f,
+            CallosumInhibitoryChance = 0.02f,
+            CallosumDelaySteps = 1
+        };
+    }
+
     // ------------------------ Cortex seeding ------------------------
 
     private void SeedCortexConnectivity(
@@ -452,6 +476,110 @@ public sealed class LatticeHostService
 
     private static int IdFromXYZ(int x, int y, int z, int sx, int sy)
         => 1 + x + (y * sx) + (z * sx * sy);
+
+    // Hemisphere-aware cortex seeding:
+    // Works with gaps because it only connects when the target coordinate exists.
+    private void SeedCortexConnectivitySparse(
+        int totalSynapses,
+        int localRadiusXY,
+        int columnLinksPerNode,
+        int feedForwardLinksPerNode,
+        int maxOutPerNode,
+        int maxDelaySteps)
+    {
+        if (totalSynapses <= 0) return;
+
+        var snap = _engine.BuildSnapshot();
+        if (snap.Nodes.Count == 0) return;
+
+        // Build coordinate -> id map from snapshot (supports gaps and non-rectangular structures).
+        var map = new Dictionary<(int x, int y, int z), int>(snap.Nodes.Count);
+        int maxId = 0;
+        for (int i = 0; i < snap.Nodes.Count; i++)
+        {
+            var n = snap.Nodes[i];
+            map[(n.Pos.X, n.Pos.Y, n.Pos.Z)] = n.Id;
+            if (n.Id > maxId) maxId = n.Id;
+        }
+
+        if (maxId <= 0) return;
+
+        // Ensure _posById is aligned with current nodes
+        EnsurePosIndexFromSnapshot(snap);
+
+        var outCount = new int[maxId + 1];
+
+        int made = 0;
+
+        // 1) Columnar vertical links (within same x,y)
+        for (int pre = 1; pre <= maxId && made < totalSynapses; pre++)
+        {
+            if (!TryGetPos(pre, out var p)) continue;
+
+            for (int k = 0; k < columnLinksPerNode && made < totalSynapses; k++)
+            {
+                if (outCount[pre] >= maxOutPerNode) break;
+
+                int dz = (NextFloat01() < 0.5f) ? 1 : -1;
+                int nz = p.Z + dz;
+                if (!map.TryGetValue((p.X, p.Y, nz), out int post)) continue;
+                if (post == pre) continue;
+
+                AddSyn(pre, post, outCount, maxOutPerNode, maxDelaySteps);
+                made++;
+            }
+        }
+
+        // 2) Feed-forward laminar links (z -> z+1) with local XY spread
+        for (int pre = 1; pre <= maxId && made < totalSynapses; pre++)
+        {
+            if (!TryGetPos(pre, out var p)) continue;
+            int nz = p.Z + 1;
+
+            for (int k = 0; k < feedForwardLinksPerNode && made < totalSynapses; k++)
+            {
+                if (outCount[pre] >= maxOutPerNode) break;
+
+                int dx = NextInt(-localRadiusXY, localRadiusXY + 1);
+                int dy = NextInt(-localRadiusXY, localRadiusXY + 1);
+
+                int nx = p.X + dx;
+                int ny = p.Y + dy;
+
+                if (!map.TryGetValue((nx, ny, nz), out int post)) continue;
+                if (post == pre) continue;
+
+                AddSyn(pre, post, outCount, maxOutPerNode, maxDelaySteps);
+                made++;
+            }
+        }
+
+        // 3) Within-layer local recurrent fibres
+        int attempts = 0;
+        int maxAttempts = System.Math.Max(10_000, (totalSynapses - made) * 25);
+
+        while (made < totalSynapses && attempts < maxAttempts)
+        {
+            attempts++;
+
+            int pre = NextInt(1, maxId + 1);
+            if (outCount[pre] >= maxOutPerNode) continue;
+            if (!TryGetPos(pre, out var p)) continue;
+
+            int dx = NextInt(-localRadiusXY, localRadiusXY + 1);
+            int dy = NextInt(-localRadiusXY, localRadiusXY + 1);
+            if (dx == 0 && dy == 0) continue;
+
+            int nx = p.X + dx;
+            int ny = p.Y + dy;
+
+            if (!map.TryGetValue((nx, ny, p.Z), out int post)) continue;
+            if (post == pre) continue;
+
+            AddSyn(pre, post, outCount, maxOutPerNode, maxDelaySteps);
+            made++;
+        }
+    }
 
     // ------------------------ grouping ------------------------
 
@@ -602,4 +730,3 @@ public sealed class LatticeHostService
         };
     }
 }
-

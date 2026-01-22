@@ -1,6 +1,5 @@
 ﻿namespace NoduleLattice.Api.Dtos;
 
-
 public sealed class LatticeSnapshotDto
 {
     public long StepIndex { get; set; }
@@ -8,6 +7,12 @@ public sealed class LatticeSnapshotDto
     public List<EdgeSnapDto> Synapses { get; set; } = new();
 }
 
+public sealed class Pos3Dto
+{
+    public int X { get; set; }
+    public int Y { get; set; }
+    public int Z { get; set; }
+}
 
 public sealed class NodeSnapDto
 {
@@ -18,20 +23,15 @@ public sealed class NodeSnapDto
     public bool Spiked { get; set; }
 }
 
-
 public sealed class EdgeSnapDto
 {
     public long Id { get; set; }
     public int Pre { get; set; }
     public int Post { get; set; }
+
+    /// <summary>Canon: synapse weight (maps from Core EdgeSnap.W)</summary>
     public float W { get; set; }
+
+    /// <summary>Canon: integer kind (maps from Core EdgeSnap.Kind)</summary>
     public int Kind { get; set; }
-}
-
-
-public sealed class Pos3Dto
-{
-    public int X { get; set; }
-    public int Y { get; set; }
-    public int Z { get; set; }
 }
